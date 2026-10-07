@@ -1,0 +1,2376 @@
+import numpy as np
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+matplotlib.use('TkAgg')
+from scipy.linalg import inv, expm, sqrtm, schur, block_diag, eigh, det, polar
+from thewalrus.symplectic import xpxp_to_xxpp, sympmat
+import os
+from pathlib import Path
+import csv
+import matplotlib.ticker as ticker
+from functools import partial
+
+PROJ_DIR = Path(__file__).parent.parent
+
+
+def symplectic_form(n):
+    """Returns the 2n × 2n symplectic form Omega"""
+    return np.block([
+        [np.zeros((n, n),dtype=np.float64), np.eye(n,dtype=np.float64)],
+        [-np.eye(n,dtype=np.float64), np.zeros((n, n),dtype=np.float64)]
+    ])
+
+
+def extract_subsystem_covariance(Gamma, indices):
+    indices = np.array(indices)
+    x_idx = indices
+    p_idx = indices + Gamma.shape[0] // 2
+    full_idx = np.concatenate([x_idx, p_idx])
+    return Gamma[np.ix_(full_idx, full_idx)]
+
+def von_neumann_entropy_alt(Gamma):
+    n = Gamma.shape[0] // 2
+    Omega = np.block([
+        [np.zeros((n, n)), np.eye(n)],
+        [-np.eye(n), np.zeros((n, n))]
+    ])
+    eigvals = np.linalg.eigvals(1j * Gamma @ Omega)
+    nu = np.sort(np.abs(eigvals))[::2]
+    nu = np.clip(nu, 0.500001, None)
+    return sum((nu + 0.5)*np.log(nu + 0.5) - (nu - 0.5)*np.log(nu - 0.5))
+
+def trace_out_subsystem(Gamma, keep_indices):
+    """
+    Return the reduced covariance matrix for a Gaussian state
+    by keeping only modes in keep_indices (x and p interleaved).
+
+    keep_indices: list or array of mode indices to keep (0 to n-1)
+    Assumes Gamma is in the (x_0,...x_n, p_0,...p_n) basis
+    """
+    n = Gamma.shape[0] // 2
+    x_idx = np.array(keep_indices)
+    p_idx = x_idx + n
+    full_idx = np.concatenate([x_idx, p_idx])
+    return Gamma[np.ix_(full_idx, full_idx)]
+
+
+
+
+def williamson_strawberry(V):
+    tol=1e-11
+    r"""Williamson decomposition of positive-definite (real) symmetric matrix.
+
+    See :ref:`williamson`.
+
+    Note that it is assumed that the symplectic form is
+
+    .. math:: \Omega = \begin{bmatrix}0&I\\-I&0\end{bmatrix}
+
+    where :math:`I` is the identity matrix and :math:`0` is the zero matrix.
+
+    See https://math.stackexchange.com/questions/1171842/finding-the-symplectic-matrix-in-williamsons-theorem/2682630#2682630
+
+    Args:
+        V (array[float]): positive definite symmetric (real) matrix
+        tol (float): the tolerance used when checking if the matrix is symmetric: :math:`|V-V^T| \leq` tol
+
+    Returns:
+        tuple[array,array]: ``(Db, S)`` where ``Db`` is a diagonal matrix
+            and ``S`` is a symplectic matrix such that :math:`V = S^T Db S`
+    """
+    (n, m) = V.shape
+
+    if n != m:
+        raise ValueError("The input matrix is not square")
+
+    diffn = np.linalg.norm(V - np.transpose(V))
+
+    if diffn >= 10**(-5):
+        raise ValueError("The input matrix is not symmetric")
+
+    if n % 2 != 0:
+        raise ValueError("The input matrix must have an even number of rows/columns")
+
+    n = n // 2
+    omega = np.block([
+        [np.zeros((n, n)), np.eye(n)],
+        [-np.eye(n), np.zeros((n, n))]
+    ])
+    vals = np.linalg.eigvalsh(V)
+
+    for val in vals:
+        if val <= 0:
+            raise ValueError("Input matrix is not positive definite")
+
+    Mm12 = sqrtm(np.linalg.inv(V)).real
+    r1 = Mm12 @ omega @ Mm12
+    s1, K = schur(r1)
+    X = np.array([[0, 1], [1, 0]])
+    I = np.identity(2)
+    seq = []
+
+    # In what follows I construct a permutation matrix p  so that the Schur matrix has
+    # only positive elements above the diagonal
+    # Also the Schur matrix uses the x_1,p_1, ..., x_n,p_n  ordering thus I use rotmat to
+    # go to the ordering x_1, ..., x_n, p_1, ... , p_n
+
+    for i in range(n):
+        if s1[2 * i, 2 * i + 1] > 0:
+            seq.append(I)
+        else:
+            seq.append(X)
+
+    p = block_diag(*seq)
+    Kt = K @ p
+    s1t = p @ s1 @ p
+    dd = xpxp_to_xxpp(s1t)
+    perm_indices = xpxp_to_xxpp(np.arange(2 * n))
+    Ktt = Kt[:, perm_indices]
+    Db = np.diag([1 / dd[i, i + n] for i in range(n)] + [1 / dd[i, i + n] for i in range(n)])
+    S = Mm12 @ Ktt @ sqrtm(Db)
+
+
+    eigvals, U = eigh(sqrtm(V) @ omega @ sqrtm(V))
+    v = np.sort(np.abs(eigvals.real))[::2]
+    return np.linalg.inv(S).T, Db, v
+
+
+
+def symplectic_eigenvalues(Gamma):
+    """
+    Compute the symplectic eigenvalues ν_i of a covariance matrix Γ.
+    """
+    n = Gamma.shape[0] // 2
+    Omega = symplectic_form(n)
+    eigvals = np.linalg.eigvals(1j * Gamma @ Omega)
+    ν = np.sort(np.abs(eigvals))[::2]  # Take only one of each ν_i pair
+    return ν
+
+
+def momentum_projection_matrix(m):
+    P = np.zeros((2*m, 2*m))
+    P[m:, m:] = np.eye(m)
+    return P
+
+
+def momentum_measured_1(Gamma,un_set,meas_set):
+    na = un_set.shape[0]//2
+    nb = meas_set.shape[0]//2
+
+    Gamma_AA = np.zeros((4*na,4*na))
+    for i in range(4):
+        for j in range(4):
+            Gamma_AA[i*na:(i+1)*na,j*na:(j+1)*na] = Gamma[(i+1)*nb+i*na:(i+1)*nb+(i+1)*na,(j+1)*nb+j*na:(j+1)*nb+(j+1)*na]
+        
+    Gamma_BB = np.zeros((4*nb,4*nb))
+    for i in range(4):
+        for j in range(4):
+            Gamma_BB[i*nb:(i+1)*nb,j*nb:(j+1)*nb] = Gamma[i*nb+i*na:(i+1)*nb+i*na,j*nb+j*na:(j+1)*nb+j*na]
+
+    Gamma_AB = np.zeros((4*na,4*nb))
+    for i in range(4):
+        for j in range(4):
+            Gamma_AB[i*na:(i+1)*na,j*nb:(j+1)*nb] = Gamma[(i+1)*nb+i*na:(i+1)*nb+(i+1)*na,j*nb+j*na:(j+1)*nb+j*na]
+
+    m = Gamma_BB.shape[0]//2
+    P = momentum_projection_matrix(m)
+    V_bdy = Gamma_AA - Gamma_AB @ np.linalg.pinv(P @ Gamma_BB @ P) @ Gamma_AB.T
+
+    return V_bdy
+
+
+
+
+def mutual_information(Gamma, idx_L, idx_R):
+    S_L = von_neumann_entropy_alt(extract_subsystem_covariance(Gamma, idx_L))
+    S_R = von_neumann_entropy_alt(extract_subsystem_covariance(Gamma, idx_R))
+    S_LR = von_neumann_entropy_alt(extract_subsystem_covariance(Gamma, idx_L + idx_R))
+    return S_L + S_R - S_LR
+
+def construct_modular_hamiltonian_with_pinning(Gamma, epsilon_max=15, tol=1e-6):
+    """
+    Constructs the modular Hamiltonian K for a mixed Gaussian state Γ,
+    assigning very high energy to pure modes (ν ≈ 0.5).
+    """
+    S, D, V = williamson_strawberry(Gamma)
+    delta = 1e-5
+    # Modular energies
+    epsilons = []
+    for v in V:
+        if np.abs(v - 0.5) < tol or v < .5:
+            epsilons.append(epsilon_max)  # Pin pure modes
+
+        else:
+            #eps = np.log((v + 0.5) / (v - 0.5))
+            eps = 2*np.arctanh(1/(2*v))
+
+            epsilons.append(eps)
+    
+    E_diag = np.diag(np.repeat(epsilons, 2))
+    # Modular Hamiltonian: K = S^{-T} E S^{-1}
+    S_inv = inv(S)
+    K = S_inv.T @ E_diag @ S_inv
+    return K
+
+def insert_two_mode_state_direct_sum(Gamma_system, insert_idx, Gamma_2mode):
+    """
+    Inserts a 2-mode state (inserted + observer) into Gamma_system by:
+    - Removing the inserted mode from Gamma_system entirely
+    - Performing a direct sum with Gamma_insert_2mode
+    - Permuting quadratures so inserted mode goes to insert_idx,
+      observer goes to the end.
+
+    Parameters:
+        Gamma_system: (2n x 2n) real symmetric covariance matrix
+        insert_idx: index (0 <= i < n) of mode to be replaced
+        Gamma_insert_2mode: (4 x 4) covariance matrix of [inserted, observer]
+
+    Returns:
+        Gamma_extended: (2n x 2n) covariance matrix with inserted + observer
+    """
+    assert Gamma_2mode.shape == (4, 4), "Gamma_insert_2mode must be 4×4"
+    n = Gamma_system.shape[0] // 2
+    assert Gamma_system.shape == (2*n, 2*n)
+
+
+    # Permute the rows and columns
+    Gamma_direct_sum = np.zeros((2*n+2,2*n+2))
+    Gamma_direct_sum[0:2*n,0:2*n] = Gamma_system
+    Gamma_permuted = Gamma_direct_sum.copy()
+    Gamma_permuted[n+1:2*n+1,:]  = Gamma_direct_sum[n:2*n,:]
+    Gamma_permuted[:,n+1:2*n+1] = Gamma_direct_sum[:,n:2*n]
+    Gamma_permuted[n+1:2*n+1,n+1:2*n+1] = Gamma_system[n:2*n+1,n:2*n+1]
+    Gamma_permuted[insert_idx,:]=0
+    Gamma_permuted[:,insert_idx]=0
+    Gamma_permuted[n,:]=0
+    Gamma_permuted[:,n]=0
+    Gamma_permuted[insert_idx+n+1,:]=0
+    Gamma_permuted[:,insert_idx+n+1]=0
+    Gamma_permuted[insert_idx,insert_idx] = Gamma_2mode[0,0]
+    Gamma_permuted[insert_idx,n] = Gamma_2mode[0,1]
+    Gamma_permuted[n,insert_idx] = Gamma_2mode[1,0]
+    Gamma_permuted[n,n] = Gamma_2mode[1,1]
+    Gamma_permuted[insert_idx+n+1,insert_idx+n+1]=Gamma_2mode[2,2]
+    Gamma_permuted[insert_idx+n+1,2*n+1] = Gamma_2mode[2,3]
+    Gamma_permuted[2*n+1,insert_idx+n+1] = Gamma_2mode[3,2]
+    Gamma_permuted[2*n+1,2*n+1]=Gamma_2mode[3,3]
+
+    return(.5*(Gamma_permuted+Gamma_permuted.T))
+
+
+
+def pad_matrix_for_observer(H_sys, observer_modes=1):
+    """
+    Pad a (2n x 2n) Hamiltonian matrix H_sys by adding `observer_modes` that evolve trivially.
+    Inserts observer position(s) after all x-quadratures and observer momentum(s) after all p-quadratures.
+
+    Assumes canonical ordering [x_0, ..., x_{n-1}, p_0, ..., p_{n-1}]
+    
+    Returns:
+        H_padded : (2(n + m) x 2(n + m)) np.array
+    """
+    assert H_sys.shape[0] == H_sys.shape[1], "H_sys must be square"
+    n_sys = H_sys.shape[0] // 2
+    m = observer_modes
+    n_total = n_sys + m
+
+    # Create full zero matrix
+    H_padded = np.zeros((2 * n_total, 2 * n_total))
+
+    # Fill top-left x block
+    H_padded[0:n_sys, 0:n_sys] = H_sys[0:n_sys, 0:n_sys]                    # x-x
+    H_padded[0:n_sys, n_total:n_total + n_sys] = H_sys[0:n_sys, n_sys:]    # x-p
+    H_padded[n_total:n_total + n_sys, 0:n_sys] = H_sys[n_sys:, 0:n_sys]    # p-x
+    H_padded[n_total:n_total + n_sys, n_total:n_total + n_sys] = H_sys[n_sys:, n_sys:]  # p-p
+
+    return H_padded
+    
+def extract_mode_block(Gamma, mode_index):
+    """
+    Extract the 2×2 covariance matrix (x, p) block for one mode from full Gamma.
+    Assumes Gamma is in (x0, ..., xn, p0, ..., pn) ordering.
+    """
+    n = Gamma.shape[0] // 2
+    x_i = mode_index
+    p_i = mode_index + n
+    return Gamma[np.ix_([x_i, p_i], [x_i, p_i])]
+
+def compute_MI_with_observer(Gamma, observer_idx, target_indices):
+    # Gamma: 2n x 2n covariance matrix
+    Gamma_obs = extract_mode_block(Gamma, observer_idx)
+    Gamma_target = trace_out_subsystem(Gamma, target_indices)
+    Gamma_joint = extract_subsystem_covariance(Gamma, target_indices + [observer_idx])
+    
+    S_obs = von_neumann_entropy_alt(Gamma_obs)
+    S_target = von_neumann_entropy_alt(Gamma_target)
+    S_joint = von_neumann_entropy_alt(Gamma_joint)
+    
+    return S_obs + S_target - S_joint
+
+
+def total_mutual_information_with_observer(Gamma_total,n_total,idx_observer):
+    all_indices = np.arange(n_total)  # all physical modes including observer
+    ab_indices = np.setdiff1d(all_indices, [idx_observer])
+
+    Gamma_C     = trace_out_subsystem(Gamma_total, [idx_observer])
+    Gamma_AB    = trace_out_subsystem(Gamma_total, ab_indices)
+    Gamma_ABC   = Gamma_total
+
+    S_C    = von_neumann_entropy_alt(Gamma_C)
+    S_AB   = von_neumann_entropy_alt(Gamma_AB)
+    S_ABC  = von_neumann_entropy_alt(Gamma_ABC)
+
+    I_C_AB = S_C + S_AB - S_ABC
+
+    return I_C_AB
+
+
+def reorder_to_block_form(Gamma):
+    """
+    Reorders 2-mode covariance matrix from [x0,p0,x1,p1] to [x0,x1,p0,p1]
+    """
+    perm = [0, 2, 1, 3]
+    return Gamma[np.ix_(perm, perm)]
+
+def two_mode_squeezed_state(r):
+    """
+    Returns 4x4 covariance matrix for a two-mode squeezed vacuum.
+    Mode 0: inserted into system
+    Mode 1: external observer
+    """
+    ch = np.cosh(2 * r)
+    sh = np.sinh(2 * r)
+    Z = np.diag([1, -1])
+    
+    cov = 0.5 * np.block([
+        [ch * np.eye(2),     sh * Z],
+        [sh * Z,             ch * np.eye(2)]
+    ])
+
+    cov = reorder_to_block_form(cov)
+    return cov
+
+
+
+def insert_unentangled_mode(Gamma, mode_index, Gamma_insert):
+    """
+    Replace a single mode (x_i, p_i) in the covariance matrix with a new unentangled mode.
+
+    Parameters:
+        Gamma : (2n x 2n) np.array
+            Original covariance matrix (x_0, ..., x_{n-1}, p_0, ..., p_{n-1})
+        mode_index : int
+            The index of the mode (0 <= i < n) to replace
+        Gamma_insert : (2x2) np.array (optional)
+            Covariance matrix for the inserted mode. If None, defaults to vacuum state.
+
+    Returns:
+        Gamma_new : (2n x 2n) np.array
+            New covariance matrix with the mode replaced
+    """
+    n = Gamma.shape[0] // 2
+    assert Gamma.shape == (2*n, 2*n), "Gamma must be 2n x 2n"
+    assert 0 <= mode_index < n, "Invalid mode index"
+
+    # Default inserted mode: vacuum (ν = 0.5, identity block)
+    if Gamma_insert is None:
+        Gamma_insert = 0.5 * np.eye(2)
+
+    # Identify row/column indices for mode i
+    x_i = mode_index
+    p_i = mode_index + n
+    idx_remove = [x_i, p_i]
+
+    # Create new Gamma by replacing x_i and p_i rows/cols
+    Gamma_new = Gamma.copy()
+
+    # Zero out off-diagonal coupling to/from x_i and p_i
+    Gamma_new[idx_remove, :] = 0
+    Gamma_new[:, idx_remove] = 0
+
+    # Insert new 2x2 unentangled block
+    Gamma_new[np.ix_(idx_remove, idx_remove)] = Gamma_insert
+
+    return Gamma_new
+
+def covmat_to_hamil(V, tol=1e-5):  # pragma: no cover
+    #V = .5*(V + V.T)
+    r"""Converts a covariance matrix to a Hamiltonian.
+
+    Given a covariance matrix V of a Gaussian state :math:`\rho` in the xp ordering,
+    finds a positive matrix :math:`H` such that
+
+    .. math:: \rho = \exp(-Q^T H Q/2)/Z
+
+    where :math:`Q = (x_1,\dots,x_n,p_1,\dots,p_n)` are the canonical
+    operators, and Z is the partition function.
+
+    For more details, see https://arxiv.org/abs/1507.01941
+
+    Args:
+        V (array): Gaussian covariance matrix
+        tol (int): the number of decimal places to use when determining if the matrix is symmetric
+
+    Returns:
+        array: positive definite Hamiltonian matrix
+    """
+    (n, m) = V.shape
+    if n != m:
+        raise ValueError("Input matrix must be square")
+    if np.linalg.norm(V - np.transpose(V)) >= tol:
+        raise ValueError("The input matrix is not symmetric")
+
+    n = n // 2
+    omega = sympmat(n)
+
+    vals = np.linalg.eigvalsh(V)
+    for val in vals:
+        if val <= 0:
+            raise ValueError("Input matrix is not positive definite")
+
+    W = 1j *  omega @ V
+    l, v = np.linalg.eig(W)
+    H = (1j * omega @ (v @ np.diag(np.arctanh(1.0 / 2*l.real)) @ np.linalg.inv(v))).real
+
+    return H
+
+def build_thermal_state_from_modular_hamiltonian(K, tol=1e-8):
+    """
+    Given a modular Hamiltonian K (real symmetric, 2n x 2n),
+    returns the corresponding thermal Gaussian state's covariance matrix Gamma.
+
+    K = S^{-T} E S^{-1}  ⇒  Gamma = S D S^T,  with D = 0.5 * coth(E/2)
+    """
+    # Ensure K is Hermitian
+    K = 0.5 * (K + K.T)
+    
+    # Diagonalize K to get E and S
+    eigvals, O = eigh(K)
+    
+    # Construct symplectic spectrum: epsilon_i = modular energy
+    E = np.diag(eigvals)
+    
+    # Compute symplectic eigenvalues ν_i = 0.5 coth(ε_i / 2)
+    epsilons = eigvals
+    nu = np.zeros_like(epsilons)
+    for i, eps in enumerate(epsilons):
+        if np.abs(eps) < tol:
+            nu[i] = 0.5  # Pure mode limit: coth(0) → ∞, but ν → 0.5
+        else:
+            nu[i] = 0.5 * 1.0 / np.tanh(0.5 * eps)
+    
+    # Build D matrix (repeated symplectic spectrum)
+    D = np.diag(np.repeat(nu, 1))  # no double since epsilons already doubled for 2x2 blocks
+
+    # Gamma = O D O^T
+    Gamma = O @ D @ O.T
+
+    # Symmetrize and return
+    return 0.5 * (Gamma + Gamma.T), nu, epsilons
+
+def symplectic_direct_sum(S1,S2):
+    n = S1.shape[0]
+    A1 = S1[0:n//2,0:n//2]
+    B1 = S1[0:n//2,n//2:n]
+    C1 = S1[n//2:n,0:n//2]
+    D1 = S1[n//2:n,n//2:n]
+
+    A2 = S2[0:n//2,0:n//2]
+    B2 = S2[0:n//2,n//2:n]
+    C2 = S2[n//2:n,0:n//2]
+    D2 = S2[n//2:n,n//2:n]
+    
+    A_block = block_diag(A1,A2)
+    B_block = block_diag(B1,B2)
+    C_block = block_diag(C1,C2)
+    D_block = block_diag(D1,D2)   
+
+    S_tot = np.block([
+        [A_block,B_block],
+        [C_block,D_block]
+    ])
+    return S_tot
+
+def gaussian_purification(V):
+    """
+    Given a mixed Gaussian state with covariance V (2n x 2n),
+    construct a purification (4n x 4n) using Weedbrook et al. Eq. (50)
+    """
+    S_xxpp, Db_xxpp, nus = williamson_strawberry(V)
+    alphas = np.sqrt(nus**2 - 0.25)
+
+    C_top = np.diag(alphas)
+    C_bottom = np.diag(-alphas)
+    C_xxpp = np.block([
+        [C_top,               np.zeros_like(C_top)],
+        [np.zeros_like(C_bottom), C_bottom]
+    ])   # 2n x 2n
+
+    D_xxpp = Db_xxpp   # this is already diag(nu_1,...,nu_n, nu_1,...,nu_n)
+
+    V_pure_will_xxpp = np.block([
+        [D_xxpp, C_xxpp],
+        [C_xxpp, D_xxpp]
+    ])
+
+    S_total = symplectic_direct_sum(S_xxpp.T, S_xxpp.T)  # or S_xxpp ⊕ I if you prefer
+    V_pure_phys_xxpp = S_total @ V_pure_will_xxpp @ S_total.T
+   
+    return V_pure_phys_xxpp
+
+def build_ring_potential(N, k, m2):
+    """V in H = 1/2 p^T p + 1/2 x^T V x for a periodic ring."""
+    V = np.zeros((N, N), dtype=float)
+    for i in range(N):
+        V[i, i] = m2 + 2.0 * k
+        V[i, (i + 1) % N] = -k
+        V[i, (i - 1) % N] = -k
+
+    return 0.5 * (V + V.T)
+
+
+def thermal_cov_one_side_from_modes(O, omega, beta):
+    """
+    One-side thermal covariance (2N×2N) in xxpp ordering [x1..xN, p1..pN].
+    """
+    N = len(omega)
+    nu = 0.5 * _coth(0.5 * beta * omega)          # symplectic spectrum of each normal mode
+    var_x = nu / omega                             # <x^2>
+    var_p = nu * omega                             # <p^2>
+
+    Gamma_xx = O @ np.diag(var_x) @ O.T
+    Gamma_pp = O @ np.diag(var_p) @ O.T
+    Gamma = np.block([[Gamma_xx, np.zeros((N, N))],
+                      [np.zeros((N, N)), Gamma_pp]])
+    return 0.5 * (Gamma + Gamma.T), nu
+
+def _coth(x):
+    # stable-ish coth for moderate x
+    return 1.0 / np.tanh(x)
+
+def tfd_cov_ring_from_normal_modes(N, k, m2, V, beta, eps_omega=1e-15):
+    """
+    Construct the *pure* TFD covariance matrix for the ring Hamiltonian
+        H = 1/2 p^T p + 1/2 x^T V x
+    at inverse temperature beta, using the normal-mode diagonalization of V.
+
+    Output ordering (4N×4N) is:
+        [x_L(1..N), x_R(1..N), p_L(1..N), p_R(1..N)]   (xxpp with LR split)
+
+    This construction is an *analytic* Gaussian purification mode-by-mode, so in exact arithmetic
+    symplectic eigenvalues of the 4N-mode state are exactly 0.5.
+    """
+    #V = build_ring_potential(N, k, m2)
+
+    # V = O diag(omega^2) O^T
+    omega2, O = np.linalg.eigh(V)
+    omega2 = np.clip(omega2, eps_omega, None)
+    omega = np.sqrt(omega2)
+
+    # Thermal invariants per normal mode
+    nu = 0.5 * _coth(0.5 * beta * omega)                 # >= 0.5
+    alpha = np.sqrt(np.maximum(nu * nu - 0.25, 0.0))     # correlations for purification
+
+    # In normal-mode basis, build 4N×4N covariance for TFD:
+    # blocks in xxpp with LR split:
+    #   xx: [ diag(nu/ω)     diag(alpha/ω)
+    #         diag(alpha/ω)  diag(nu/ω)     ]
+    #
+    #   pp: [ diag(nu*ω)     diag(-alpha*ω)
+    #         diag(-alpha*ω) diag(nu*ω)     ]
+    #
+    #   xp = px = 0
+    Dx  = np.diag(nu / omega)
+    Dp  = np.diag(nu * omega)
+    Cx  = np.diag(alpha / omega)
+    Cp  = np.diag(-alpha * omega)
+
+    xx_nm = np.block([[Dx, Cx],
+                      [Cx, Dx]])
+    pp_nm = np.block([[Dp, Cp],
+                      [Cp, Dp]])
+
+    Gamma_nm = np.block([[xx_nm, np.zeros((2*N, 2*N))],
+                         [np.zeros((2*N, 2*N)), pp_nm]])
+
+    # Transform back to site basis on BOTH L and R, for x and p:
+    # x_L = O x'_L, x_R = O x'_R, p_L = O p'_L, p_R = O p'_R
+    O2 = np.block([[O, np.zeros((N, N))],
+                   [np.zeros((N, N)), O]])   # acts on (L,R) index within x-block or p-block
+    S = np.block([[O2, np.zeros((2*N, 2*N))],
+                  [np.zeros((2*N, 2*N)), O2]])
+
+    Gamma_site = S @ Gamma_nm @ S.T
+    Gamma_site = 0.5 * (Gamma_site + Gamma_site.T)
+
+    # Also return the one-side thermal covariance (useful sanity check)
+    Gamma_th, nu_check = thermal_cov_one_side_from_modes(O, omega, beta)
+
+    # purity check
+    nu_tfd = symplectic_eigenvalues(Gamma_site)   # should be ~0.5 for all 2N modes
+    return Gamma_site
+
+#define coupling Hamiltonian
+
+# Global oscillator indices of left and right boundaries
+#bdy_len = 2**(L - 1)         # e.g. 128
+#bdy_1 = np.arange(N - bdy_len, N)               # left boundary: physical indices
+#bdy_2 = np.arange(N_tot - bdy_len, N_tot)       # right boundary: physical indices
+
+# Map these physical indices into the post-measurement (Gamma_TFD) indexing
+# You need to find where each bdy_1 and bdy_2 element lies in un_set
+#lookup = {node: i for i, node in enumerate(un_set)}
+#bdy_1_idx = np.array([lookup[x] for x in bdy_1])
+#bdy_2_idx = np.array([lookup[x] for x in bdy_2])
+
+
+def H_coupling_matrix(N):
+    bdy_len = N
+    bdy_1_idx = np.arange(bdy_len)
+    bdy_2_idx = np.arange(bdy_len,2*bdy_len)
+
+    #carrier_indices = np.arange(0, bdy_len)  # skip teleportation qubit
+
+    insert_idx = 1
+    carrier_indices1 = np.arange(0,insert_idx)
+    carrier_indices2 = np.arange(insert_idx+1,bdy_len)
+    carrier_indices = np.concatenate((carrier_indices1,carrier_indices2))
+
+    def idx_x(j): return j
+    def idx_p(j): return j + n_total
+
+    n_total = 2*bdy_len
+    H_coupling_OG = np.zeros((2*n_total, 2*n_total))
+    mu = 1
+
+    #omega0=1
+
+    for j in carrier_indices:
+        x_L = bdy_1_idx[j]
+        x_R = bdy_2_idx[j]
+        # x coupling
+        H_coupling_OG[x_L, x_R] = H_coupling_OG[x_R, x_L] = mu / 2
+        # p coupling
+        H_coupling_OG[x_L + n_total, x_R + n_total] = H_coupling_OG[x_R + n_total, x_L + n_total] = mu / 2
+    """
+    L = 4
+    Lh = 3
+    n_tube = 0
+    g_tube = 1
+    mu_A = 1
+    mu_B = 1
+    mu_s = 1
+    t = 10
+
+    # Build the graph
+    N = 2**(Lh - 1) * (2**(L - Lh + 1) - 1)
+    bdy_len = 2**(L - 1)
+    bdy_1 = np.arange(N - bdy_len, N)
+    N_tot = 2 * N + n_tube * 2**(Lh - 1)
+    bdy_2 = np.arange(N_tot - bdy_len, N_tot)
+
+    # Build base adjacency matrix A
+    A = np.zeros((N, N), dtype=np.float64)
+    for l1 in range(Lh, L + 1):
+        for s1 in range(1, 2**(l1 - 1) + 1):
+            for l2 in range(Lh, L + 1):
+                for s2 in range(1, 2**(l2 - 1) + 1):
+                    prev1 = sum(2**(k - 1) for k in range(Lh, l1))
+                    prev2 = sum(2**(k - 1) for k in range(Lh, l2))
+                    ind1 = prev1 + s1 - 1
+                    ind2 = prev2 + s2 - 1
+                    if l1 == l2 and (abs(s1 - s2) == 1 or abs(s1 - s2) == 2**(l1 - 1) - 1):
+                        A[ind1, ind2] = mu_s
+                    if l2 == l1 + 1 and s2 in [2*s1, 2*s1 - 1]:
+                        A[ind1, ind2] = mu_s
+                    if l1 == l2 + 1 and s1 in [2*s2, 2*s2 - 1]:
+                        A[ind1, ind2] = mu_s
+
+    # Full adjacency with duplicated regions and tube
+    A_tot = np.zeros((N_tot, N_tot),dtype=np.float64)
+    A_tot[:N, :N] = A
+    A_tot[N_tot - N:, N_tot - N:] = A
+    hor_1 = np.arange(2**(Lh - 1))
+    for ell in range(n_tube + 1):
+        offset = N + (ell - 1) * 2**(Lh - 1)
+        if ell == 0:
+            for i in hor_1:
+                A_tot[i, i + N] = A_tot[i + N, i] = g_tube
+        elif ell > 0:
+            for i in hor_1:
+                A_tot[i + offset, i + offset + 2**(Lh - 1)] = g_tube
+                A_tot[i + offset + 2**(Lh - 1), i + offset] = g_tube
+                # Horizontal connections
+                if i < 2**(Lh - 1) - 1:
+                    A_tot[i + offset, i + offset + 1] = A_tot[i + offset + 1, i + offset] = g_tube
+                else:
+                    A_tot[i + offset, i + offset - (2**(Lh - 1) - 1)] = A_tot[i + offset - (2**(Lh - 1) - 1), i + offset] = g_tube
+    
+    # Index sets
+    un_set = np.concatenate([bdy_1, bdy_2])
+    meas_set = np.setdiff1d(np.arange(N_tot), un_set)
+
+
+    Gamma_0 =.5 * np.eye(2*N_tot,dtype=np.complex128)
+
+
+
+
+    # Number of total modes
+    n = N_tot
+
+    # Default: mass = 1, so kinetic term is identity
+    M = 1* np.eye(n)
+    D = np.zeros((n,n))
+    for i in range(n):
+        D[i,i]=sum(A_tot[i,:])
+
+    # Potential term = adjacency + onsite mass term
+    mu_squared = 0  # Choose this to control oscillator frequency
+    K = D - A_tot + mu_squared * np.eye(n)
+
+    # Construct full Hamiltonian H (2n x 2n) in (x1..xn, p1..pn) basis
+    H = np.block([
+        [K,         np.zeros((n, n))],
+        [np.zeros((n, n)),   M     ]
+    ])
+
+
+    n = Gamma_0.shape[0] // 2
+    Omega = symplectic_form(n)
+    S_t = expm(Omega @ H * t)
+    Gamma_q = S_t @ Gamma_0 @ S_t.T
+
+
+    Gamma_TFD = momentum_measured_1(Gamma_q,un_set,meas_set)
+
+
+    b = bdy_len
+    keep = np.arange(b)  # keep left boundary
+    Gamma_reduced = trace_out_subsystem(Gamma_TFD, keep)
+
+    #HL = covmat_to_hamil(Gamma_reduced)
+    HL = construct_modular_hamiltonian_with_pinning(Gamma_reduced)
+
+    HL = np.zeros((2*N,2*N))
+    for i in range(2*N):
+        if i < N-1:
+            HL[i, i] = m_squared + 2 * k  # on-site + two neighbors
+            HL[i,i+1] = -k
+            HL[i+1, i] = -k    
+        if i == N-1:
+            HL[i,0] = -k
+            HL[0,i] = -k 
+            HL[i,i] = m_squared + 2 * k 
+        if i > N-1:
+            HL[i,i] = 1
+
+    #N = Gamma_TFD.shape[0]//4
+    HL_full = np.zeros((4*N, 4*N))
+    HL_full[np.ix_(range(N), range(N))] = HL[:N, :N]                     # x-x
+    HL_full[np.ix_(range(N), range(2*N, 3*N))] = HL[:N, N:]             # x-p
+    HL_full[np.ix_(range(2*N, 3*N), range(N))] = HL[N:, :N]             # p-x
+    HL_full[np.ix_(range(2*N, 3*N), range(2*N, 3*N))] = HL[N:, N:]      # p-p
+
+
+    HR_full = np.zeros((4*N, 4*N))
+    HR_full[np.ix_(range(N, 2*N), range(N, 2*N))] = HL[:N, :N]
+    HR_full[np.ix_(range(N, 2*N), range(3*N, 4*N))] = HL[:N, N:]
+    HR_full[np.ix_(range(3*N, 4*N), range(N, 2*N))] = HL[N:, :N]
+    HR_full[np.ix_(range(3*N, 4*N), range(3*N, 4*N))] = HL[N:, N:]
+
+    H_LR = HL_full+HR_full
+
+    H_coupling_OG += H_LR
+    """
+    return H_coupling_OG
+
+
+def generate_interacting_tfd(n, omega_0, J, beta,periodic):
+    """
+    Generates the coupled modular Hamiltonian and covariance matrix
+    for a continuous-variable tight-binding chain.
+    """
+    # 1. Construct the spatial hopping matrix (Hamiltonian h)
+    h = omega_0 * np.eye(n)
+    for i in range(n - 1):
+        h[i, i+1] = -J
+        h[i+1, i] = -J
+    if periodic==True:
+        h[0,n-1] = -J
+        h[n-1,0] = -J
+
+    # 2. Diagonalize to find collective normal modes
+    eigenvalues, V = np.linalg.eigh(h)
+
+    # 3. Calculate mode-dependent squeezing parameters from temperature
+    # cosh(2r) = coth(beta * omega / 2)
+    cosh_r = np.zeros(n)
+    sinh_r = np.zeros(n)
+    lambda_diagonal = np.zeros(n)
+
+    for i, omega_i in enumerate(eigenvalues):
+        # Prevent division by zero for unphysical modes
+        omega_i = max(omega_i, 1e-5)
+        # Physical relation: tanh(r) = exp(-beta * omega / 2)
+        tanh_ri = np.exp(-beta * omega_i / 2)
+        # Avoid pure saturation limits
+        tanh_ri = min(tanh_ri, 0.999) 
+        
+        # Recover squeezing parameter r
+        r_i = np.arctanh(tanh_ri)
+        
+        cosh_r[i] = np.cosh(2 * r_i)
+        sinh_r[i] = np.sinh(2 * r_i)
+        lambda_diagonal[i] = np.log(1.0 / tanh_ri)
+
+    # 4. Assemble matrices in the normal-mode basis
+    C_mat = np.diag(cosh_r)
+    S_mat = np.diag(sinh_r)
+    zeros_n = np.zeros((n, n))
+
+    Gamma_NM = np.block([
+        [C_mat, S_mat, zeros_n, zeros_n],
+        [S_mat, C_mat, zeros_n, zeros_n],
+        [zeros_n, zeros_n, C_mat, -S_mat],
+        [zeros_n, zeros_n, -S_mat, C_mat]
+    ])
+
+    KL_NM_block = np.diag(lambda_diagonal)
+    KL_NM = np.block([
+        [KL_NM_block, zeros_n],
+        [zeros_n, KL_NM_block]
+    ])
+
+    # 5. Transform back to the physical local spatial basis using V
+    V_4n = block_diag(V, V, V, V)
+    V_2n = block_diag(V, V)
+
+    Gamma_physical = V_4n @ Gamma_NM @ V_4n.T
+    KL_physical = V_2n @ KL_NM @ V_2n.T
+
+    return Gamma_physical, KL_physical
+
+
+def make_boundary_coupling(n, insert_idx, g):
+
+    coupling_sites_1 = np.arange(0,insert_idx)
+    coupling_sites_2 = np.arange(insert_idx+1,n)
+    coupling_sites= np.concatenate((coupling_sites_1,coupling_sites_2))
+
+
+    N = 4*n
+    G = np.zeros((N,N))
+
+    for j in coupling_sites:
+
+        # x_L x_R
+        G[j, n+j] = g
+        G[n+j, j] = g
+
+        # p_L p_R
+        G[2*n+j, 3*n+j] = g
+        G[3*n+j, 2*n+j] = g
+
+    return G
+
+def build_tfd_and_HL(L,Lh,n_tube):
+
+    g_tube = 1
+    mu_A = 1
+    mu_B = 1
+    mu_s = 1
+    t = 10
+
+    # Build the graph
+    N = 2**(Lh - 1) * (2**(L - Lh + 1) - 1)
+    bdy_len = 2**(L - 1)
+    bdy_1 = np.arange(N - bdy_len, N)
+    N_tot = 2 * N + n_tube * 2**(Lh - 1)
+    bdy_2 = np.arange(N_tot - bdy_len, N_tot)
+
+    # Build base adjacency matrix A
+    A = np.zeros((N, N), dtype=np.float64)
+    for l1 in range(Lh, L + 1):
+        for s1 in range(1, 2**(l1 - 1) + 1):
+            for l2 in range(Lh, L + 1):
+                for s2 in range(1, 2**(l2 - 1) + 1):
+                    prev1 = sum(2**(k - 1) for k in range(Lh, l1))
+                    prev2 = sum(2**(k - 1) for k in range(Lh, l2))
+                    ind1 = prev1 + s1 - 1
+                    ind2 = prev2 + s2 - 1
+                    if l1 == l2 and (abs(s1 - s2) == 1 or abs(s1 - s2) == 2**(l1 - 1) - 1):
+                        A[ind1, ind2] = mu_s
+                    if l2 == l1 + 1 and s2 in [2*s1, 2*s1 - 1]:
+                        A[ind1, ind2] = mu_s
+                    if l1 == l2 + 1 and s1 in [2*s2, 2*s2 - 1]:
+                        A[ind1, ind2] = mu_s
+
+    # Full adjacency with duplicated regions and tube
+    A_tot = np.zeros((N_tot, N_tot),dtype=np.float64)
+    A_tot[:N, :N] = A
+    A_tot[N_tot - N:, N_tot - N:] = A
+    hor_1 = np.arange(2**(Lh - 1))
+    for ell in range(n_tube + 1):
+        offset = N + (ell - 1) * 2**(Lh - 1)
+        if ell == 0:
+            for i in hor_1:
+                A_tot[i, i + N] = A_tot[i + N, i] = g_tube
+        elif ell > 0:
+            for i in hor_1:
+                A_tot[i + offset, i + offset + 2**(Lh - 1)] = g_tube
+                A_tot[i + offset + 2**(Lh - 1), i + offset] = g_tube
+                # Horizontal connections
+                if i < 2**(Lh - 1) - 1:
+                    A_tot[i + offset, i + offset + 1] = A_tot[i + offset + 1, i + offset] = g_tube
+                else:
+                    A_tot[i + offset, i + offset - (2**(Lh - 1) - 1)] = A_tot[i + offset - (2**(Lh - 1) - 1), i + offset] = g_tube
+
+    # Index sets
+    un_set = np.concatenate([bdy_1, bdy_2])
+    meas_set = np.setdiff1d(np.arange(N_tot), un_set)
+
+
+    Gamma_0 =.5 * np.eye(2*N_tot,dtype=np.complex128)
+
+
+
+
+    # Number of total modes
+    n = N_tot
+
+    # Default: mass = 1, so kinetic term is identity
+    M = 1* np.eye(n)
+    D = np.zeros((n,n))
+    for i in range(n):
+        D[i,i]=sum(A_tot[i,:])
+
+    # Potential term = adjacency + onsite mass term
+    mu_squared = 0  # Choose this to control oscillator frequency
+    K = D - A_tot + mu_squared * np.eye(n)
+
+    # Construct full Hamiltonian H (2n x 2n) in (x1..xn, p1..pn) basis
+    H = np.block([
+        [K,         np.zeros((n, n))],
+        [np.zeros((n, n)),   M     ]
+    ])
+
+
+    n = Gamma_0.shape[0] // 2
+    Omega = symplectic_form(n)
+    S_t = expm(Omega @ H * t)
+    Gamma_q = S_t @ Gamma_0 @ S_t.T
+
+
+    Gamma_TFD = momentum_measured_1(Gamma_q,un_set,meas_set)
+
+
+    b = bdy_len
+    keep = np.arange(b)  # keep left boundary
+    Gamma_reduced = trace_out_subsystem(Gamma_TFD, keep)
+
+    #HL = covmat_to_hamil(Gamma_reduced)
+    HL = construct_modular_hamiltonian_with_pinning(Gamma_reduced)
+    return Gamma_TFD,HL
+
+
+
+def modular_filter_matrix(
+    K,
+    cutoff=1.0,
+    filter_type="lorentz"
+):
+    """
+    Construct spectral filter F(K).
+
+    Parameters
+    ----------
+    K : modular Hamiltonian matrix
+
+    cutoff : modular energy scale Lambda
+
+    filter_type :
+        "exp"      -> exp(-eps/Lambda)
+        "lorentz"  -> 1/(1+(eps/Lambda)^2)
+        "sharp"    -> theta(Lambda-eps)
+
+    Returns
+    -------
+    F : filtered matrix
+    """
+
+    #
+    # Symmetrize
+    #
+    K = 0.5 * (K + K.T)
+
+    #
+    # Diagonalize
+    #
+    eps, U = eigh(K)
+
+    #
+    # Positive energies only
+    #
+    eps = np.abs(eps)
+
+    #
+    # Spectral filter
+    #
+    if filter_type == "exp":
+        f = np.exp(-eps / cutoff)
+
+    elif filter_type == "lorentz":
+        f = 1.0 / (1.0 + (eps / cutoff)**2)
+
+    elif filter_type == "sharp":
+        f = (eps < cutoff).astype(float)
+
+    else:
+        raise ValueError("Unknown filter type")
+
+    #
+    # Reconstruct operator
+    #
+    F = U @ np.diag(f) @ U.T
+
+    return 0.5 * (F + F.T)
+
+def build_filtered_traversable_coupling(
+    HL,
+    bdy_len,
+    carrier_indices,
+    eta=1.0,
+    cutoff=1.0,
+    filter_type="exp"
+):
+    """
+    Modular-energy filtered traversable interaction.
+    """
+
+    n_total = 2 * bdy_len
+
+    #
+    # Build modular filter
+    #
+    F = modular_filter_matrix(
+        HL,
+        cutoff=cutoff,
+        filter_type=filter_type
+    )
+
+    #
+    # Full Hamiltonian
+    #
+    H_int = np.zeros((2*n_total, 2*n_total))
+
+    #
+    # Left/right mode lists
+    #
+    left_modes = np.array(carrier_indices)
+    right_modes = left_modes + bdy_len
+
+    #
+    # Build phase-space index lists
+    #
+    idxL = np.concatenate([
+        left_modes,
+        left_modes + n_total
+    ])
+
+    idxR = np.concatenate([
+        right_modes,
+        right_modes + n_total
+    ])
+
+    #
+    # Restrict filter to coupled modes
+    #
+    keep = np.concatenate([
+        carrier_indices,
+        np.array(carrier_indices) + bdy_len
+    ])
+
+    F_sub = F[np.ix_(keep, keep)]
+
+    #
+    # Insert LR coupling
+    #
+    H_int[np.ix_(idxL, idxR)] = eta * F_sub
+    H_int[np.ix_(idxR, idxL)] = eta * F_sub.T
+
+    #
+    # Symmetrize
+    #
+    H_int = 0.5 * (H_int + H_int.T)
+
+    return H_int
+
+
+
+def teleportation_protocol(s,theta,insert_idx,wormhole,n_one_side,H_coupling,coupling,t_evolve,t_couple):
+    q = insert_idx
+    t0 = t_evolve
+    if wormhole == False:
+        N = 2*n_one_side
+        k = 5
+        m_squared = 13
+        HL = np.zeros((N,N))
+        
+        for i in range(N):
+            if i < N//2-1:
+                HL[i, i] = m_squared + 2 * k  # on-site + two neighbors
+                HL[i,i+1] = -k
+                HL[i+1, i] = -k 
+                 
+            if i == N//2-1:
+                HL[i,0] = -k
+                HL[0,i] = -k 
+                HL[i,i] = m_squared + 2 * k 
+            if i > N//2-1:
+                HL[i,i] = 1
+        """
+        HL_rand=np.zeros((N,N))
+        for i in range(N):
+            a = np.random.uniform(.2,2)
+            if i < N//2-1:
+                HL_rand[i, i] += m_squared + a   # on-site + two neighbors
+                HL_rand[i+1, i+1] += a
+                HL_rand[i,i+1] = -a
+                HL_rand[i+1, i] = -a
+      
+            if i == N//2-1:
+                HL_rand[i,0] = -a
+                HL_rand[0,i] = -a
+                HL_rand[i,i] += m_squared + a
+                HL_rand[0,0] += a
+            if i > N//2-1:
+                HL_rand[i,i] = 2.5
+
+
+        HL_rand_all_A = np.zeros((N//2,N//2))
+        HL_rand_all_mom = 2.5*np.eye(N//2)
+
+        for i in range(N//2):
+            for j in range(N//2):
+                HL_rand_all_A[i,j] = np.random.uniform(.1,2)
+                HL_rand_all_A[j,i] = HL_rand_all_A[i,j]
+        D = np.zeros((N//2,N//2))
+        for i in range(N//2):
+            D[i,i]=sum(HL_rand_all_A[i,:]) + m_squared
+
+        HL_rand_all_pos = D - HL_rand_all_A
+        HL_rand_all = np.block([[HL_rand_all_pos,np.zeros((N//2,N//2))],
+                       [np.zeros((N//2,N//2)),HL_rand_all_mom]])
+
+        HL = HL
+        """
+        #Gamma_reconstructed, nu, eps_reconstructed = build_thermal_state_from_modular_hamiltonian(HL)
+
+        #Gamma_TFD = gaussian_purification(Gamma_reconstructed)
+        V = build_ring_potential(N//2, k, m_squared)
+        
+        Gamma_TFD = tfd_cov_ring_from_normal_modes(N//2, k, m_squared, V, beta=1, eps_omega=1e-15)
+
+
+
+    else:
+        # Parameters
+        L = 6
+        Lh = 3
+        n_tube = 0
+        g_tube = 1
+        mu_A = 1
+        mu_B = 1
+        mu_s = 1
+        t = 10
+
+        # Build the graph
+        N = 2**(Lh - 1) * (2**(L - Lh + 1) - 1)
+        bdy_len = 2**(L - 1)
+        bdy_1 = np.arange(N - bdy_len, N)
+        N_tot = 2 * N + n_tube * 2**(Lh - 1)
+        bdy_2 = np.arange(N_tot - bdy_len, N_tot)
+
+        # Build base adjacency matrix A
+        A = np.zeros((N, N), dtype=np.float64)
+        for l1 in range(Lh, L + 1):
+            for s1 in range(1, 2**(l1 - 1) + 1):
+                for l2 in range(Lh, L + 1):
+                    for s2 in range(1, 2**(l2 - 1) + 1):
+                        prev1 = sum(2**(k - 1) for k in range(Lh, l1))
+                        prev2 = sum(2**(k - 1) for k in range(Lh, l2))
+                        ind1 = prev1 + s1 - 1
+                        ind2 = prev2 + s2 - 1
+                        if l1 == l2 and (abs(s1 - s2) == 1 or abs(s1 - s2) == 2**(l1 - 1) - 1):
+                            A[ind1, ind2] = mu_s
+                        if l2 == l1 + 1 and s2 in [2*s1, 2*s1 - 1]:
+                            A[ind1, ind2] = mu_s
+                        if l1 == l2 + 1 and s1 in [2*s2, 2*s2 - 1]:
+                            A[ind1, ind2] = mu_s
+
+        # Full adjacency with duplicated regions and tube
+        A_tot = np.zeros((N_tot, N_tot),dtype=np.float64)
+        A_tot[:N, :N] = A
+        A_tot[N_tot - N:, N_tot - N:] = A
+        hor_1 = np.arange(2**(Lh - 1))
+        for ell in range(n_tube + 1):
+            offset = N + (ell - 1) * 2**(Lh - 1)
+            if ell == 0:
+                for i in hor_1:
+                    A_tot[i, i + N] = A_tot[i + N, i] = g_tube
+            elif ell > 0:
+                for i in hor_1:
+                    A_tot[i + offset, i + offset + 2**(Lh - 1)] = g_tube
+                    A_tot[i + offset + 2**(Lh - 1), i + offset] = g_tube
+                    # Horizontal connections
+                    if i < 2**(Lh - 1) - 1:
+                        A_tot[i + offset, i + offset + 1] = A_tot[i + offset + 1, i + offset] = g_tube
+                    else:
+                        A_tot[i + offset, i + offset - (2**(Lh - 1) - 1)] = A_tot[i + offset - (2**(Lh - 1) - 1), i + offset] = g_tube
+ 
+        # Index sets
+        un_set = np.concatenate([bdy_1, bdy_2])
+        meas_set = np.setdiff1d(np.arange(N_tot), un_set)
+
+
+        Gamma_0 =.5 * np.eye(2*N_tot,dtype=np.complex128)
+
+
+
+
+        # Number of total modes
+        n = N_tot
+
+        # Default: mass = 1, so kinetic term is identity
+        M = 1* np.eye(n)
+        D = np.zeros((n,n))
+        for i in range(n):
+            D[i,i]=sum(A_tot[i,:])
+
+        # Potential term = adjacency + onsite mass term
+        mu_squared = 0  # Choose this to control oscillator frequency
+        K = D - A_tot + mu_squared * np.eye(n)
+
+        # Construct full Hamiltonian H (2n x 2n) in (x1..xn, p1..pn) basis
+        H = np.block([
+            [K,         np.zeros((n, n))],
+            [np.zeros((n, n)),   M     ]
+        ])
+
+
+        n = Gamma_0.shape[0] // 2
+        Omega = symplectic_form(n)
+        S_t = expm(Omega @ H * t)
+        Gamma_q = S_t @ Gamma_0 @ S_t.T
+
+
+        Gamma_TFD = momentum_measured_1(Gamma_q,un_set,meas_set)
+
+
+        b = bdy_len
+        keep = np.arange(b)  # keep left boundary
+        Gamma_reduced = trace_out_subsystem(Gamma_TFD, keep)
+
+        #HL = covmat_to_hamil(Gamma_reduced)
+        HL = construct_modular_hamiltonian_with_pinning(Gamma_reduced)
+
+
+
+    ############
+
+
+
+    n = Gamma_TFD.shape[0] // 2
+    bdy_len = Gamma_TFD.shape[0] // 4
+    b = bdy_len
+
+
+    HL_full = np.zeros((2*n, 2*n))
+    HL_full[np.ix_(range(b), range(b))] = HL[:b, :b]                     # x-x
+    HL_full[np.ix_(range(b), range(n, n + b))] = HL[:b, b:]             # x-p
+    HL_full[np.ix_(range(n, n + b), range(b))] = HL[b:, :b]             # p-x
+    HL_full[np.ix_(range(n, n + b), range(n, n + b))] = HL[b:, b:]      # p-p
+
+
+
+
+    # Symplectic form
+    Omega = symplectic_form(n)
+
+    # Evolve backward in time
+
+    S_back = expm(-1 * Omega @ HL_full * t0)
+    Gamma_back = S_back @ Gamma_TFD @ S_back.T
+
+
+    ###########
+    # insert quantum information on one side
+    ###########
+
+
+    
+
+    #teleported_idx = bdy_len + q # index 0 on right side starts here
+
+
+    n_total = Gamma_TFD.shape[0] // 2
+
+
+
+    Rot = np.array([[np.cos(theta), -np.sin(theta)],
+                [np.sin(theta), np.cos(theta)]])
+    Squeeze = 0.5 * np.array([[np.exp(-2*s), 0],
+                          [0, np.exp(2*s)]])
+
+    Gamma_rot_squeezed = Rot @ Squeeze @ Rot.T
+
+    Gamma_insert = insert_unentangled_mode(Gamma_back, insert_idx, Gamma_rot_squeezed)
+
+    Gamma_2mode = two_mode_squeezed_state(r=1)
+
+    Gamma_with_observer = insert_two_mode_state_direct_sum(Gamma_back, insert_idx, Gamma_2mode)
+
+    HL_full_padded = pad_matrix_for_observer(HL_full)
+
+    #######
+    # evolve forwards in time
+    #######
+    S_forward_no_insert = expm(Omega @ HL_full * t0)
+    Gamma_forward = S_forward_no_insert @ Gamma_insert @ S_forward_no_insert.T
+
+    n_total = (Gamma_with_observer.shape[0]) // 2  # now n+1
+    Omega_padded = symplectic_form(n_total)
+    S_forward_observer = expm(Omega_padded @ HL_full_padded * t0)
+    Gamma_forward_observer = S_forward_observer @ Gamma_with_observer @ S_forward_observer.T
+
+    #######
+    # couple the two sides
+    #######
+
+    if coupling==True:     
+        S_coupling = expm(Omega @ H_coupling * t_couple)
+        Gamma_coupled = S_coupling @ Gamma_forward @ S_coupling.T
+
+        H_coupling_padded = pad_matrix_for_observer(H_coupling)
+        S_coupling_observer = expm(Omega_padded @ H_coupling_padded * t_couple)
+        Gamma_coupled_observer = S_coupling_observer @ Gamma_forward_observer @ S_coupling_observer.T
+    else:
+        Gamma_coupled = Gamma_forward
+        Gamma_coupled_observer = Gamma_forward_observer
+
+    ######
+    # evolve state forwards in time with KR
+    ######
+
+
+    HR_full = np.zeros((2*n, 2*n))
+    HR_full[np.ix_(range(b, 2*b), range(b, 2*b))] = HL[:b, :b]
+    HR_full[np.ix_(range(b, 2*b), range(n + b, n + 2*b))] = HL[:b, b:]
+    HR_full[np.ix_(range(n + b, n + 2*b), range(b, 2*b))] = HL[b:, :b]
+    HR_full[np.ix_(range(n + b, n + 2*b), range(n + b, n + 2*b))] = HL[b:, b:]
+
+    HR_full_padded = pad_matrix_for_observer(HR_full)
+
+
+
+    S_final = expm(Omega @ HR_full * t0)
+    Gamma_final = S_final @ Gamma_coupled @ S_final.T
+
+    S_final_observer = expm(Omega_padded @ HR_full_padded * t0)
+    Gamma_final_observer = S_final_observer @ Gamma_coupled_observer @ S_final_observer.T
+
+    teleported_idx = bdy_len + q # index 0 on right side starts here
+
+
+
+    Gamma_teleported = extract_mode_block(Gamma_final, teleported_idx)
+
+    #Gamma_final = measure_left_side(Gamma_final,n_one_side)
+
+
+    Gamma_out_real = 0.5 * (Gamma_teleported + Gamma_teleported.conj().T)
+    return Gamma_final_observer, Gamma_final, Gamma_forward_observer, Gamma_forward
+
+
+
+def make_input_covariance(s, theta):
+    Rot = np.array([[np.cos(theta), -np.sin(theta)],
+                    [np.sin(theta),  np.cos(theta)]])
+    Squeeze = 0.5 * np.array([[np.exp(-2*s), 0],
+                              [0, np.exp( 2*s)]])
+    return sym(Rot @ Squeeze @ Rot.T)
+
+def make_rotation(M):
+    """Force a 2x2 orthogonal matrix to have det=+1 (proper rotation)."""
+    M = M.copy()
+    if np.linalg.det(M) < 0:
+        M[:, 1] *= -1
+    return M
+
+
+def decoder_from_X_symplectic(X):
+    U, s, Vt = np.linalg.svd(X)
+    O1= U.copy()
+    O2 = Vt.copy()
+
+    if det(U)<0:
+        O1[:,1]*=-1
+
+    s1, s2 = s
+    D = np.diag((s2,s1))
+    r = 0.5*np.log(s2/s1)
+    squeeze = np.diag([np.exp(-r), np.exp(r)])
+
+    eta = np.sqrt(s1 * s2)
+
+    if det(U)<0:
+        loss = np.diag((eta,-eta))
+    else:
+       loss = np.diag((eta,eta))  
+
+
+    return O1 @ squeeze @ O2
+
+
+
+def decompose_X(X):
+    U, s, Vt = np.linalg.svd(X)
+    O1= U.copy()
+    O2 = Vt.copy()
+
+    if det(U)<0:
+        O1[:,1]*=-1
+
+    s1, s2 = s
+    D = np.diag((s2,s1))
+    r = 0.5*np.log(s2/s1)
+    squeeze = np.diag([np.exp(-r), np.exp(r)])
+
+    eta = np.sqrt(s1 * s2)
+
+    if det(U)<0:
+        loss = np.diag((eta,-eta))
+    else:
+       loss = np.diag((eta,eta))  
+
+
+    return O1, loss, squeeze, O2
+
+
+def decoder_from_X_flip(X):
+    U, s, Vt = np.linalg.svd(X)
+
+    s1, s2 = s
+    D = np.diag((s2,s1))
+    r = 0.5*np.log(s2/s1)
+    squeeze = np.diag([np.exp(-r), np.exp(r)])
+
+    eta = np.sqrt(s1 * s2)
+    loss = np.diag((s1,s2))
+
+
+    return U @ squeeze @ Vt
+
+
+
+
+def sym(A): 
+    return 0.5*(A + A.T)
+
+
+def pack_params(X, Y):
+    # Y symmetric
+    return np.array([X[0,0], X[0,1], X[1,0], X[1,1], Y[0,0], Y[0,1], Y[1,1]], dtype=float)
+
+def unpack_params(p):
+    a,b,c,d,y11,y12,y22 = p
+    X = np.array([[a,b],[c,d]], dtype=float)
+    Y = np.array([[y11,y12],[y12,y22]], dtype=float)
+    return X, Y
+
+def residuals(p, Vins, Vouts):
+    X, Y = unpack_params(p)
+    r = []
+    for Vin, Vout in zip(Vins, Vouts):
+        E = sym(Vout - (X @ Vin @ X.T + Y))
+        r.extend([E[0,0], E[0,1], E[1,1]])  # 3 independent comps
+    return np.array(r, dtype=float)
+
+
+def fit_gaussian_channel(Vins, Vouts, X0=None, Y0=None, lam=1e-3, iters=200):
+    Vins  = [sym(V) for V in Vins]
+    Vouts = [sym(V) for V in Vouts]
+
+    if X0 is None:
+        X0 = np.eye(2)
+    if Y0 is None:
+        # crude initial Y as average difference
+        Y0 = sym(np.mean([Vout - X0@Vin@X0.T for Vin,Vout in zip(Vins,Vouts)], axis=0))
+
+    p = pack_params(X0, Y0)
+
+    for _ in range(iters):
+        r = residuals(p, Vins, Vouts)
+        cost = r @ r
+
+        # numerical Jacobian (7 params)
+        J = np.zeros((len(r), len(p)))
+        eps = 1e-6
+        for j in range(len(p)):
+            dp = np.zeros_like(p); dp[j] = eps
+            r2 = residuals(p + dp, Vins, Vouts)
+            J[:,j] = (r2 - r) / eps
+
+        # LM step: (J^T J + lam I) delta = J^T r
+        A = J.T @ J + lam*np.eye(len(p))
+        g = J.T @ r
+        delta = np.linalg.solve(A, g)
+
+        p_new = p - delta
+        r_new = residuals(p_new, Vins, Vouts)
+        cost_new = r_new @ r_new
+
+        # accept/reject, update damping
+        if cost_new < cost:
+            p = p_new
+            lam *= 0.7
+        else:
+            lam *= 2.0
+
+        if np.linalg.norm(delta) < 1e-10:
+            break
+
+    X, Y = unpack_params(p)
+    return X, sym(Y)
+
+def reorder_to_block_form(Gamma):
+    """
+    Reorders 2-mode covariance matrix from [x0,p0,x1,p1] to [x0,x1,p0,p1]
+    """
+    perm = [0, 2, 1, 3]
+    return Gamma[np.ix_(perm, perm)]
+
+def tmsv_cov(r):
+    """
+    Returns 4x4 covariance matrix for a two-mode squeezed vacuum.
+    Mode 0: inserted into system
+    Mode 1: external observer
+    """
+    ch = np.cosh(2 * r)
+    sh = np.sinh(2 * r)
+    Z = np.diag([1, -1])
+    
+    cov = 0.5 * np.block([
+        [ch * np.eye(2),     sh * Z],
+        [sh * Z,             ch * np.eye(2)]
+    ])
+
+    cov = reorder_to_block_form(cov)
+    return cov
+
+def fidelity_stable(V1, V2):
+    V1 = 0.5*(V1 + V1.T)
+    V2 = 0.5*(V2 + V2.T)
+    n = V1.shape[0] // 2
+    omega = symplectic_form(n)
+
+    Vsum = V1 + V2
+    V_aux = omega.T @ np.linalg.inv(Vsum) @ (0.25 * omega + V2 @ omega @ V1)
+
+    I = np.eye(2*n)
+    A = V_aux @ omega
+
+    # A^{-2} = solve(A, solve(A, I))
+    Ainv2 = np.linalg.solve(A, np.linalg.solve(A, I))
+    inside = I + 0.25 * Ainv2
+
+    F_tot4 = np.linalg.det(2 * (sqrtm(inside) + I) @ V_aux)
+    F_tot = np.real_if_close(F_tot4)**0.25
+    F0 = F_tot / (np.linalg.det(Vsum)**0.25)
+
+    return float(np.real(F0))
+
+
+def decode_on_B_xxpp(V_RB_xxpp, S_dec,Y,subtract_Y):
+    I2 = np.eye(2)
+    # xxpp ordering: (xR, xB, pR, pB)
+    # decoding acts on (xB,pB) => indices [1,3], not contiguous.
+    V = 0.5*(V_RB_xxpp + V_RB_xxpp.T)
+    idx_R = [0, 2]
+    idx_B = [1, 3]
+
+    Vout = V.copy()
+
+    # transform blocks: B -> S_dec B S_dec^T, C -> C S_dec^T
+    A = V[np.ix_(idx_R, idx_R)]
+    B = V[np.ix_(idx_B, idx_B)]
+    C = V[np.ix_(idx_R, idx_B)]
+
+    if subtract_Y == True:
+        B-=Y
+
+    B2 = S_dec @ B @ S_dec.T
+    C2 = C @ S_dec.T
+
+    Vout[np.ix_(idx_R, idx_R)] = A
+    Vout[np.ix_(idx_B, idx_B)] = B2
+    Vout[np.ix_(idx_R, idx_B)] = C2
+    Vout[np.ix_(idx_B, idx_R)] = C2.T
+
+    return 0.5*(Vout + Vout.T)
+
+
+def entanglement_fidelity_gaussian(X, Y, S,subtract_Y,r=1.0):
+    V0 = tmsv_cov(r)
+    V1 = apply_channel_to_second_mode_xxpp(V0, X, Y)
+    V1_dec = decode_on_B_xxpp(V1,inv(S),Y,subtract_Y)
+    # zero means:
+    #mu0 = np.zeros(4)
+    #mu1 = np.zeros(4)  
+    return fidelity_stable(V0,V1_dec)
+
+def gaussian_fidelity_mixed(Gamma1, Gamma2):
+    """
+    Computes the fidelity between two 1-mode mixed Gaussian states
+    assuming zero displacement (centered states).
+    
+    Parameters:
+        Gamma1, Gamma2: 2x2 real symmetric covariance matrices
+    
+    Returns:
+        Fidelity F ∈ [0, 1]
+    """
+    det1 = np.linalg.det(Gamma1)
+    det2 = np.linalg.det(Gamma2)
+    det_sum = np.linalg.det(Gamma1 + Gamma2)
+
+    delta = (det1 - 0.25) * (det2 - 0.25)
+
+    F = 1.0 / (np.sqrt(det_sum + delta) - np.sqrt(delta))
+    return F
+
+def apply_channel_to_second_mode_xxpp(V_RB_xxpp, X, Y):
+    """
+    Apply a 1-mode Gaussian channel (X,Y) to mode B of a 2-mode covariance matrix
+    given in xxpp ordering: (xR, xB, pR, pB).
+
+    V_RB_xxpp: 4x4 covariance in order [xR, xB, pR, pB]
+    X, Y: 2x2 with respect to (xB, pB)
+    """
+    V = sym(V_RB_xxpp)
+    X = np.asarray(X, float)
+    Y = sym(np.asarray(Y, float))
+
+    # Indices for the R and B modes in xxpp ordering
+    idx_R = [0, 2]  # (xR, pR)
+    idx_B = [1, 3]  # (xB, pB)
+
+    # Extract 2x2 blocks in (x,p) ordering for each mode
+    A = V[np.ix_(idx_R, idx_R)]   # Cov of R
+    B = V[np.ix_(idx_B, idx_B)]   # Cov of B
+    C = V[np.ix_(idx_R, idx_B)]   # Cross-cov R-B
+
+    # Transform blocks under channel on B
+    A_out = A
+    C_out = C @ X.T
+    B_out = X @ B @ X.T + Y
+
+    # Reassemble full 4x4 in xxpp ordering
+    V_out = V.copy()
+    V_out[np.ix_(idx_R, idx_R)] = A_out
+    V_out[np.ix_(idx_R, idx_B)] = C_out
+    V_out[np.ix_(idx_B, idx_R)] = C_out.T
+    V_out[np.ix_(idx_B, idx_B)] = B_out
+
+    return sym(V_out)
+
+def sym(A): return 0.5*(A + A.T)
+
+def noise_metrics(X, Y):
+    Y = sym(Y)
+    detX = np.linalg.det(X)
+    y_eff = 0.5*np.trace(Y)  # average added noise
+    y_det = np.sqrt(max(np.linalg.det(Y), 0.0))
+    y_iso_min = abs(1 - detX)/2  # phase-insensitive quantum-limited scale
+    ratio = y_eff / (y_iso_min + 1e-12)
+    return detX, y_eff, y_det, y_iso_min, ratio
+
+
+def build_rankK_coupling_LRO(
+    N_boundary,        # n in your L/R (without observer): left has n, right has n
+    left_seg,          # length m, values in [0..n-1]
+    right_seg,         # length m, values in [n..2n-1]  (GLOBAL mode ids in LRO convention)
+    O_L,               # K x m
+    O_R,               # K x m
+    g=None,            # None or length-K array of coupling strengths
+    include_observer=False
+):
+    """
+    Returns H_coup for ordering:
+      [x_L(n), x_R(n), x_O, p_L(n), p_R(n), p_O]  if include_observer
+      [x_L(n), x_R(n),       p_L(n), p_R(n)]      if not include_observer
+
+    Notes:
+      - left_seg must be left mode IDs (0..n-1)
+      - right_seg must be right mode IDs (n..2n-1)
+      - O_L, O_R are K×m weights defining collective modes on those segments
+    """
+    n = N_boundary
+    m = len(left_seg)
+    assert len(right_seg) == m
+    K = O_L.shape[0]
+    assert O_L.shape == (K, m)
+    assert O_R.shape == (K, m)
+
+    if g is None:
+        g = np.ones(K)
+    g = np.asarray(g, float)
+    assert g.shape == (K,)
+
+    G = np.diag(g)  # K×K
+    # physical segment coupling J = O_L^T G O_R  (m×m)
+    J = O_L.T @ G @ O_R
+
+    if include_observer:
+        Ntot = 2*n + 1   # total modes including observer
+        dim = 2*Ntot
+        obs = 2*n
+    else:
+        Ntot = 2*n
+        dim = 2*Ntot
+
+    H = np.zeros((dim, dim), dtype=float)
+
+    # ---- x-x block coupling between physical modes in left_seg and right_seg ----
+    # In LRO ordering, x indices are just mode ids themselves.
+    xL = np.array(left_seg, dtype=int)
+    xR = np.array(right_seg, dtype=int)
+
+    # Place 1/2 * J into H[xL, xR] using segment-local indexing
+    # We need to map segment-local (0..m-1) pairs to global indices.
+    for a in range(m):
+        for b in range(m):
+            H[xL[a], xR[b]] += 0.5 * J[a, b]
+            H[xR[b], xL[a]] += 0.5 * J[a, b]  # symmetric (since we used same J)
+
+    # ---- p-p block coupling ----
+    # p index = mode_id + Ntot
+    pL = xL + Ntot
+    pR = xR + Ntot
+    for a in range(m):
+        for b in range(m):
+            H[pL[a], pR[b]] += 0.5 * J[a, b]
+            H[pR[b], pL[a]] += 0.5 * J[a, b]
+
+    # Symmetrize to be safe
+    H = 0.5 * (H + H.T)
+    return H
+
+
+def build_coupling_LRO(
+    N_boundary,        # n in your L/R (without observer): left has n, right has n
+    left_seg,          # length m, values in [0..n-1]
+    right_seg,         # length m, values in [n..2n-1]  (GLOBAL mode ids in LRO convention)
+    O_L,               # K x m
+    O_R,               # K x m
+    g=None,            # None or length-K array of coupling strengths
+    include_observer=False
+):
+    """
+    Returns H_coup for ordering:
+      [x_L(n), x_R(n), x_O, p_L(n), p_R(n), p_O]  if include_observer
+      [x_L(n), x_R(n),       p_L(n), p_R(n)]      if not include_observer
+
+    Notes:
+      - left_seg must be left mode IDs (0..n-1)
+      - right_seg must be right mode IDs (n..2n-1)
+      - O_L, O_R are K×m weights defining collective modes on those segments
+    """
+    n = N_boundary
+    m = len(left_seg)
+    assert len(right_seg) == m
+    KO = O_L.shape[0]
+    if g is None:
+        g = np.ones(KO)
+    g = np.asarray(np.ones(KO), float)
+    
+    G = np.diag(g)  # K×K
+    # physical segment coupling J = O_L^T G O_R  (m×m)
+    J = O_L.T @ G @ O_R
+
+    if include_observer:
+        Ntot = 2*n + 1   # total modes including observer
+        dim = 2*Ntot
+        obs = 2*n
+    else:
+        Ntot = 2*n
+        dim = 2*Ntot
+
+    H = np.zeros((dim, dim), dtype=float)
+
+    # ---- x-x block coupling between physical modes in left_seg and right_seg ----
+    # In LRO ordering, x indices are just mode ids themselves.
+    xL = np.array(left_seg, dtype=int)
+    xR = np.array(right_seg, dtype=int)
+
+    # Place 1/2 * J into H[xL, xR] using segment-local indexing
+    # We need to map segment-local (0..m-1) pairs to global indices.
+    for a in range(m):
+        for b in range(m):
+            H[xL[a], xR[b]] += 0.5 * J[a, b]
+            H[xR[b], xL[a]] += 0.5 * J[a, b]  # symmetric (since we used same J)
+
+    # ---- p-p block coupling ----
+    # p index = mode_id + Ntot
+    pL = xL + Ntot
+    pR = xR + Ntot
+    for a in range(m):
+        for b in range(m):
+            H[pL[a], pR[b]] += 0.5 * J[a, b]
+            H[pR[b], pL[a]] += 0.5 * J[a, b]
+
+    # Symmetrize to be safe
+    H = 0.5 * (H + H.T)
+    return H
+
+def right_segment_ids(teleported_id, n, m):
+    # right ring ids are n..2n-1
+    start = teleported_id - (m//2)
+    start = max(start, n)
+    start = min(start, 2*n - m)
+    return np.arange(start, start + m)
+
+def left_segment_ids(insert_id, n, m):
+    # right ring ids are n..2n-1
+    start = insert_id - (m//2)
+    start = max(start, 0)
+    start = min(start, n - m)
+    return np.arange(start, start + m)
+
+def X_metrics(X):
+    s = np.linalg.svd(X, compute_uv=False)     # singular values
+    s = np.sort(s)[::-1]
+    spec = s[0]
+    fro  = np.linalg.norm(X, 'fro')
+    det  = abs(np.linalg.det(X))
+    return {"s1": s[0], "s2": s[1], "spec": spec, "fro": fro, "det": det}
+
+
+
+
+
+
+def fidelity_vs_site(
+    insert_idx,
+    input_ensemble,
+    H_coupling,
+    n,
+    t_evolve,
+    t_couple):
+    coupling=True
+    wormhole=True
+
+
+
+    Vins = []
+
+    Vouts = [[] for i in range(2*n)]
+
+
+    for s, theta in input_ensemble:
+        # Run your usual protocol (NO observer) to get global Gamma_final
+        Gamma_final_obs_1, Gamma_final, Gamma_forward_obs_1,Gamma_forward = teleportation_protocol(s,
+        theta,
+        insert_idx,
+        wormhole,
+        n,
+        H_coupling,
+        coupling,
+        t_evolve,
+        t_couple)
+
+            
+        Vins.append(make_input_covariance(s,theta))
+        for i in range(2*n):
+            Vouts[i].append(extract_subsystem_covariance(Gamma_final,[i]))
+            #Vouts[i].append(extract_subsystem_covariance(Gamma_final,[i]))
+        
+
+        # --- 5) Fit a single-mode Gaussian channel for this decoded mode ---
+
+    fid_symp = []
+    fid_flip = []
+
+
+    for i in range(2*n):
+        X, Y = fit_gaussian_channel(Vins, Vouts[i])
+        rot1,loss,squeeze,rot2 = decompose_X(X)
+        #print(i)
+        #print(f"rot1={rot1}")
+        #print(f"rot2={rot2}")
+        #print(f"loss={loss}")
+        #print(f"squeeze={squeeze}")
+        #print(f"Y={Y}")
+
+        S_dec_symp = decoder_from_X_symplectic(X)  # your preferred
+        S_dec_flip = decoder_from_X_flip(X)  # your preferred
+
+        Fs = entanglement_fidelity_gaussian(X, Y, S_dec_symp, subtract_Y=False, r=1.0)
+        Ff = entanglement_fidelity_gaussian(X, Y, S_dec_flip, subtract_Y=False, r=1.0)
+
+        fid_symp.append(Fs)
+        fid_flip.append(Ff)
+
+        #print(f"fid_flip_3={Ff}")
+        #print(f"fid_symp_3={Fs}")
+
+    return fid_symp,fid_flip
+
+def scale_y_labels(x, pos,scale_factor):
+    return f"{x * scale_factor:.1f}"  # .1f formats to 1 decimal place
+
+
+def simple_light_cone(coeffs_t,t_evolve_fid,t_evolve_mi,t0):
+    T, dim = coeffs_t.shape
+    n = dim // 2
+
+    # |x_i| coefficients over time
+    plt.imshow(np.abs(coeffs_t[:, :n]), aspect='auto', cmap='inferno', origin='lower')
+    plt.axhline(t_evolve_mi*T/t0,color='blue',linestyle="dashed",label="mutual information time")
+    plt.axhline(t_evolve_fid*T/t0,color='red',linestyle="dashed",label="fidelity time")        
+    plt.ylabel('Time')
+    plt.xlabel('Site')
+
+    custom_formatter = partial(scale_y_labels, scale_factor=t0/T)
+
+    plt.gca().yaxis.set_major_formatter(ticker.FuncFormatter(custom_formatter))
+    plt.colorbar(orientation='vertical', label=r'$|S_t(r_i(0))|$')
+    plt.legend()
+
+    plt.show()
+
+def mut_info_segments(Gamma_TFD,Gamma_LR_observer):
+    observer_idx = Gamma_TFD.shape[0]//2
+    mut_info_insert_regions = []
+    mut_info_telep_regions = []
+
+    lengths_array = np.linspace(1,Gamma_TFD.shape[0] // 8,Gamma_TFD.shape[0] // 8)
+    center_idx = Gamma_TFD.shape[0] // 8
+
+    for i in range(1,lengths_array.shape[0]):
+        #if i == 0:
+        #segment_telep = [teleported_idx]
+        if center_idx - i >= 0 and center_idx + i < Gamma_TFD.shape[0]//4:
+            segment_insert = np.arange(center_idx - i, center_idx + i+1)
+        if center_idx - i < 0:
+            diff = np.abs(center_idx - i)
+            segment_insert_1 = np.arange(Gamma_TFD.shape[0]//4-diff,Gamma_TFD.shape[0]//4)
+            segment_insert_2 = np.arange(0,center_idx+i+1)
+            segment_insert = np.concatenate((segment_insert_1,segment_insert_2))
+        if center_idx + i >= Gamma_TFD.shape[0]//4:
+            diff = center_idx + i - Gamma_TFD.shape[0]//4
+            segment_insert_1 = np.arange(center_idx-i,Gamma_TFD.shape[0]//4)
+            segment_insert_2 = np.arange(0,diff+1)
+            segment_insert = np.concatenate((segment_insert_1,segment_insert_2))
+        segment_insert = np.ndarray.tolist(segment_insert)
+        mut_info_insert_regions.append(mutual_information(Gamma_LR_observer,[observer_idx],segment_insert))
+        if center_idx  - i >= 0  and center_idx  + i < Gamma_TFD.shape[0]//4:
+            segment_telep = np.arange(center_idx + Gamma_TFD.shape[0]//4 - i, center_idx + Gamma_TFD.shape[0]//4 + i+1)
+        if center_idx - i < 0 :
+            diff = np.abs(center_idx - i)
+            segment_telep_1 = np.arange(Gamma_TFD.shape[0]//2-diff,Gamma_TFD.shape[0]//2)
+            segment_telep_2 = np.arange(Gamma_TFD.shape[0] // 4 ,center_idx + Gamma_TFD.shape[0] // 4 + i+1)
+            segment_telep = np.concatenate((segment_telep_1,segment_telep_2))
+        if center_idx + i >= Gamma_TFD.shape[0]//4:
+            diff = center_idx + i - Gamma_TFD.shape[0]//4
+            segment_telep_1 = np.arange(center_idx + Gamma_TFD.shape[0] // 4 - i,Gamma_TFD.shape[0]//2)
+            segment_telep_2 = np.arange(Gamma_TFD.shape[0] // 4,Gamma_TFD.shape[0] //4 + diff+1)
+            segment_telep = np.concatenate((segment_telep_1,segment_telep_2))
+        segment_telep = np.ndarray.tolist(segment_telep)
+        mut_info_telep_regions.append(mutual_information(Gamma_LR_observer, [observer_idx], segment_telep))
+
+
+
+    mut_info_insert_regions.append(mutual_information(Gamma_LR_observer, [observer_idx], list(range(n))))
+    mut_info_telep_regions.append(mutual_information(Gamma_LR_observer,[observer_idx],list(range(n,2*n))))
+
+    mi_total = mutual_information(Gamma_LR_observer,[observer_idx],list(range(2*n)))
+    mut_info_insert_regions=np.array(mut_info_insert_regions)
+    mut_info_telep_regions=np.array(mut_info_telep_regions)
+
+    mut_info_insert_regions*=1/mi_total
+    mut_info_telep_regions*=1/mi_total
+
+
+    full_lengths_array = 2 * lengths_array + 1
+    full_lengths_array[-1] = n
+
+    return mut_info_insert_regions,mut_info_telep_regions,full_lengths_array
+
+def heisenberg_evolution_operator(H, t, n):
+    Omega = symplectic_form(n)
+    return expm(Omega @ H * t)
+
+def operator_spread_over_time(H, t_list, op_index=0):
+    """
+    Computes the Heisenberg evolution of operator r_op_index over time.
+    
+    Returns:
+        coeffs_t: list of arrays of coefficients at each time
+    """
+    n = H.shape[0] // 2  # number of modes
+    coeffs_t = []
+
+    for t in t_list:
+        S_t = heisenberg_evolution_operator(H, t, n)
+        r0 = np.zeros(2 * n)
+        r0[op_index] = 1.0  # evolve x_{op_index}(t)
+
+        evolved = S_t @ r0
+        coeffs_t.append(evolved)
+
+    return np.array(coeffs_t)  # shape: (len(t_list), 2n)
+
+
+
+
+n = 32
+
+insert_idx = 1
+
+
+#t_evolve = 1.72
+#t_evolve_full = 2.36
+
+#t_evolve = 1.78
+#t_evolve_full = 2.17
+
+t_evolve = 1.82
+t_evolve_full = 2.35
+
+t0 = t_evolve_full*1.2
+coupling=True
+wormhole=True
+
+
+
+t_couple = 3.1
+#t_couple = .69
+
+
+
+Ss = np.linspace(-1, 1, 4)
+Thetas = np.linspace(0, 2*np.pi, 3, endpoint=False)
+input_ensemble = [(s, th) for s in Ss for th in Thetas]  # 120 points, deterministic
+
+sites=np.arange(0,2*n)
+
+#for f in range(len(sites)):
+
+#H_coupling = H_coupling(n)
+
+Gamma_TFD,HL = build_tfd_and_HL(6,3,0)
+
+cutoff = 400
+carrier_indices1 = np.arange(0,insert_idx)
+carrier_indices2 = np.arange(insert_idx+1,n)
+carrier_indices = np.concatenate((carrier_indices1,carrier_indices2))
+"""
+H_coupling = build_filtered_traversable_coupling(
+    HL,
+    n,
+    carrier_indices,
+    eta=2.0,
+    cutoff=cutoff,
+    filter_type="lorentz"
+)
+"""
+
+H_coupling = H_coupling_matrix(n)
+
+Fs,fidelity= fidelity_vs_site(
+    insert_idx,
+    input_ensemble,
+    H_coupling,
+    n,
+    t_evolve,
+    t_couple)
+
+"""
+rows = zip(list(sites),list(Ff))
+
+with open(f'{PROJ_DIR}/data/hopping_fidelity_ring.csv', 'w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerows(rows)
+"""
+
+s=0
+theta=np.pi
+
+Gamma_final_obs_single, _, _, _=teleportation_protocol(
+    s,
+    theta,
+    insert_idx,
+    wormhole,
+    n,
+    H_coupling,
+    coupling,
+    t_evolve,
+    t_couple)
+
+Gamma_final_obs_full, _, _, _=teleportation_protocol(
+    s,
+    theta,
+    insert_idx,
+    wormhole,
+    n,
+    H_coupling,
+    coupling,
+    t_evolve_full,
+    t_couple)
+
+
+mi_full_list = []
+mi_single_list = []
+
+for i in range(len(sites)):
+    mi_full = mutual_information(Gamma_final_obs_full,[2*n],[sites[i]])
+    mi_full*= 1/(mutual_information(Gamma_final_obs_full,[2*n],list(range(0,2*n))))
+    mi_full_list.append(mi_full)
+
+    mi_single = mutual_information(Gamma_final_obs_single,[2*n],[sites[i]])
+    mi_single*= 1/(mutual_information(Gamma_final_obs_single,[2*n],list(range(0,2*n))))
+    mi_single_list.append(mi_single)
+
+
+#plt.plot(sites,Fs,label="symplectic")
+plt.rc('font', size=14)
+plt.plot(sites,fidelity,"bo",linewidth=2,label="fidelity")
+plt.plot(sites,mi_single_list,"ro",linewidth=2,label="mutual information fidelity time")
+plt.plot(sites,mi_full_list,"ko",markerfacecolor="None",linewidth=2,label="mutual information full side time")
+
+
+plt.axvline(insert_idx,color="m",linestyle="dashed",linewidth=2,label="insert site")
+plt.axvline(insert_idx+n,color="green",linestyle="dashed",linewidth=2,label="teleport site")
+plt.xlabel("Site")
+plt.ylabel("Fidelity")
+#plt.title("Channel Fidelity")
+#plt.legend()
+plt.show()
+
+
+
+
+
+"""
+t_evolve_fid = np.linspace(.1,20,80)
+fidelity_evolve_list = []
+for t in range(len(t_evolve_fid)):
+    Fs,Ff= fidelity_vs_site(
+    insert_idx,
+    input_ensemble,
+    H_coupling,
+    n,
+    t_evolve_fid[t],
+    t_couple)
+    fidelity_evolve_list.append(Ff[insert_idx+n])
+
+
+t_couple_fid = np.linspace(.1,12.5,80)
+fidelity_couple_list = []
+for t in range(len(t_couple_fid)):
+    Fs,Ff= fidelity_vs_site(
+        insert_idx,
+        input_ensemble,
+        H_coupling,
+        n,
+        t_evolve,
+        t_couple_fid[t])
+    fidelity_couple_list.append(Ff[insert_idx+n])
+    #print(fidelity_couple_list[-1],t_couple_list[t])
+"""
+
+
+
+t_evolve_mi = np.linspace(.1,10,100)
+t_couple_mi = np.linspace(.1,12.5,100)
+#t_couple_mi = np.linspace(.1,7.87,100)
+
+
+mi_evolve_list = []
+mi_evolve_telep_list = []
+mi_couple_list = []
+mi_couple_telep_list = []
+
+s=1
+theta = np.pi/2
+
+
+for t in range(len(t_evolve_mi)):
+    Gamma_obs_evolve,_,_,_ = teleportation_protocol(
+        s,
+        theta,
+        insert_idx,
+        wormhole,
+        n,
+        H_coupling,
+        coupling,
+        t_evolve_mi[t],
+        t_couple)
+    mi_evolve = mutual_information(Gamma_obs_evolve,[2*n],list(range(n,2*n)))
+    mi_evolve*= 1/(mutual_information(Gamma_obs_evolve,[2*n],list(range(0,2*n))))
+    mi_evolve_list.append(mi_evolve)
+
+    mi_evolve_telep = mutual_information(Gamma_obs_evolve,[2*n],[insert_idx+n])
+    mi_evolve_telep*=1/(mutual_information(Gamma_obs_evolve,[2*n],list(range(0,2*n))))
+    mi_evolve_telep_list.append(mi_evolve_telep)
+
+
+    Gamma_obs_couple,_,_,_ = teleportation_protocol(
+        s,
+        theta,
+        insert_idx,
+        wormhole,
+        n,
+        H_coupling,
+        coupling,
+        t_evolve,
+        t_couple_mi[t])
+    mi_couple = mutual_information(Gamma_obs_couple,[2*n],list(range(n,2*n)))
+    mi_couple*= 1/(mutual_information(Gamma_obs_couple,[2*n],list(range(0,2*n))))    
+    mi_couple_list.append(mi_couple)
+
+    mi_couple_telep = mutual_information(Gamma_obs_couple,[2*n],[insert_idx+n])
+    mi_couple_telep*=1/(mutual_information(Gamma_obs_couple,[2*n],list(range(0,2*n))))
+    mi_couple_telep_list.append(mi_couple_telep)
+
+
+plt.rc('font', size=14)
+plt.plot(t_evolve_mi,mi_evolve_list,'k.',label="full side mutual information")
+plt.plot(t_evolve_mi,mi_evolve_telep_list,'r.',label="single site mutual information")
+#plt.plot(t_evolve_fid,fidelity_evolve_list,'b',label="fidelity")
+#plt.axhline(.3067,color="green",linestyle="dashed",label="no coupling fidelity")
+plt.xlabel("Evolution time")
+plt.ylabel("Metric")
+plt.legend()
+plt.show()
+
+plt.rc('font', size=14)
+plt.plot(t_couple_mi,mi_couple_list,'r',label="full side mutual information")
+plt.plot(t_couple_mi,mi_couple_telep_list,'b',label="single site mutual information")
+#plt.plot(t_couple_fid,fidelity_couple_list,'b',label="fidelity")
+#plt.axhline(.3067,color="green",linestyle="dashed",label="no coupling fidelity")
+plt.xlabel("Coupling Time")
+plt.ylabel("Mutual Information")
+#plt.legend()
+plt.show()
+
+
+
+t_list = np.linspace(0, t0, 100)  # 100 time steps from t=0 to t=10
+coeffs_simple = operator_spread_over_time(HL, t_list, op_index=0)  # evolve x_0(t)
+simple_light_cone(coeffs_simple,t_evolve,t_evolve_full,t0)
+
+T, dim = coeffs_simple.shape
+n = dim // 2
+
+
+# |x_i| coefficients over time
+plt.imshow(np.abs(coeffs_simple[:, :n]), aspect='auto', cmap='inferno', origin='lower')
+plt.axhline(t_evolve_full*T/t0,color='blue',linestyle="dashed",label="mutual information time")
+plt.axhline(t_evolve*T/t0,color='red',linestyle="dashed",label="fidelity time")        
+plt.ylabel('Time')
+plt.xlabel('Site')
+
+custom_formatter = partial(scale_y_labels, scale_factor=t0/T)
+
+plt.gca().yaxis.set_major_formatter(ticker.FuncFormatter(custom_formatter))
+plt.colorbar(orientation='vertical', label=r'$|S_t(r_i(0))|$')
+plt.legend()
+
+plt.show()
+
+
+
+
+mut_info_insert_regions_full,mut_info_telep_regions_full,full_lengths_array=mut_info_segments(Gamma_TFD,Gamma_final_obs_full)
+mut_info_insert_regions,mut_info_telep_regions,_=mut_info_segments(Gamma_TFD,Gamma_final_obs_single)
+
+
+plt.rc('font', size=14) 
+#linewidth=4
+plt.plot(full_lengths_array,mut_info_insert_regions_full,'ro',linewidth=2,label = "insert side mutual info")
+plt.plot(full_lengths_array,mut_info_telep_regions_full,'rs',linewidth=2, label ="teleport side mutual info")
+plt.plot(full_lengths_array,mut_info_insert_regions,'bo',markerfacecolor='None',linewidth=2,label = "insert side fidelity")
+plt.plot(full_lengths_array,mut_info_telep_regions,'bs',markerfacecolor='None',linewidth=2, label ="teleport side fidelity")
+
+#plt.axhline(mutual_information(Gamma_LR_observer,[observer_idx],list(range(2*n))),color = "blue", label = "total mutual info with observer")
+plt.xlabel("length of segment")
+plt.ylabel("mutual information with observer")
+plt.title("Mutual Information of Segments")
+plt.legend()
+plt.show()
+
+
+
+fig, axs = plt.subplots(2, 2, figsize=(15, 9))
+#fig.set_layout_engine('constrained', w_pad=0.5) 
+axs[0,0].plot(t_evolve_mi,mi_evolve_list,'r.',label="full side mutual information")
+axs[0,0].plot(t_evolve_mi,mi_evolve_telep_list,'b.',label="single site mutual information")
+#axs[0,0].plot(t_evolve_fid,fidelity_evolve_list,'b',label="fidelity")
+#axs[0,0].axhline(.3067,color="green",linestyle="dashed",label="no coupling fidelity")
+
+axs[0,0].set_xlabel('Evolution time')
+axs[0,0].set_ylabel('Normalized Mutual Information')
+
+im = axs[0,1].imshow(np.abs(coeffs_simple[:, :n]), aspect='auto', cmap='inferno', origin='lower')
+axs[0,1].axhline(t_evolve_full*T/t0,color='red',linewidth=5,linestyle="dashed",label="mutual information time")
+axs[0,1].axhline(t_evolve*T/t0,color='blue',linewidth=5,linestyle="dashed",label="fidelity time")        
+axs[0,1].set_ylabel('Time')
+axs[0,1].set_xlabel('Site')
+custom_formatter = partial(scale_y_labels, scale_factor=t0/T)
+
+axs[0,1].yaxis.set_major_formatter(ticker.FuncFormatter(custom_formatter))
+
+fig.colorbar(im, ax=axs[0,1],orientation='vertical', label=r'$|S_t(r_i(0))|$')
+
+
+#axs[1,0].plot(sites,fidelity,"bo",linewidth=2,label="fidelity")
+axs[1,0].plot(sites,mi_full_list,"ro",linewidth=2,label="mutual information full side time")
+axs[1,0].plot(sites,mi_single_list,"bo",markerfacecolor="None",linewidth=2,label="mutual information fidelity time")
+
+
+axs[1,0].axvline(insert_idx,color="m",linestyle="dashed",linewidth=2,label="insert site")
+axs[1,0].axvline(insert_idx+n,color="green",linestyle="dashed",linewidth=2,label="teleport site")
+axs[1,0].set_xlabel("Site")
+axs[1,0].set_ylabel("Normalized Mutual Information")
+
+axs[1,1].plot(full_lengths_array,mut_info_insert_regions_full,'ro',linewidth=2,label = "insert side mutual info")
+axs[1,1].plot(full_lengths_array,mut_info_telep_regions_full,'rs',linewidth=2, label ="teleport side mutual info")
+axs[1,1].plot(full_lengths_array,mut_info_insert_regions,'bo',markerfacecolor='None',linewidth=2,label = "insert side fidelity")
+axs[1,1].plot(full_lengths_array,mut_info_telep_regions,'bs',markerfacecolor='None',linewidth=2, label ="teleport side fidelity")
+
+axs[1,1].set_xlabel("Length of Segment")
+axs[1,1].set_ylabel("Mutual Information with Observer")
+
+#plt.legend()
+
+labels = ["(a)", "(b)", "(c)", "(d)"]
+
+for ax, label in zip(axs.flat, labels):
+    ax.text(
+        -0.1,  # X-coordinate: slightly to the left of the plot boundary
+        1.05,  # Y-coordinate: slightly above the top plot boundary
+        label,
+        transform=ax.transAxes,  # Use relative axis units (0 to 1)
+        fontsize=14,
+        fontweight="bold",
+        va="bottom",  # Vertical alignment
+        ha="right"  # Horizontal alignment
+    )
+plt.show()
+
+print("stop")
+
