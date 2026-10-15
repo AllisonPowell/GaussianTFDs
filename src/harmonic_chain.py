@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 matplotlib.use('TkAgg')
 from scipy.linalg import inv, expm, sqrtm, schur, block_diag, eigh, det, polar
@@ -642,7 +643,7 @@ def H_coupling(N):
     H_coupling_OG = np.zeros((2*n_total, 2*n_total))
     mu = 1
     k = 5
-    m_squared = 13
+    m_squared = 4
     omega0 = np.sqrt(m_squared + 2*k)
     #omega0=1
 
@@ -881,7 +882,8 @@ def teleportation_protocol(s,theta,insert_idx,wormhole,n_one_side,H_coupling,cou
     if wormhole == False:
         N = 2*n_one_side
         k = 5
-        m_squared = 13
+        m_squared = 4
+        beta = .3
         HL = np.zeros((N,N))
         
         for i in range(N):
@@ -896,48 +898,10 @@ def teleportation_protocol(s,theta,insert_idx,wormhole,n_one_side,H_coupling,cou
                 HL[i,i] = m_squared + 2 * k 
             if i > N//2-1:
                 HL[i,i] = 1
-        """
-        HL_rand=np.zeros((N,N))
-        for i in range(N):
-            a = np.random.uniform(.2,2)
-            if i < N//2-1:
-                HL_rand[i, i] += m_squared + a   # on-site + two neighbors
-                HL_rand[i+1, i+1] += a
-                HL_rand[i,i+1] = -a
-                HL_rand[i+1, i] = -a
-      
-            if i == N//2-1:
-                HL_rand[i,0] = -a
-                HL_rand[0,i] = -a
-                HL_rand[i,i] += m_squared + a
-                HL_rand[0,0] += a
-            if i > N//2-1:
-                HL_rand[i,i] = 2.5
 
-
-        HL_rand_all_A = np.zeros((N//2,N//2))
-        HL_rand_all_mom = 2.5*np.eye(N//2)
-
-        for i in range(N//2):
-            for j in range(N//2):
-                HL_rand_all_A[i,j] = np.random.uniform(.1,2)
-                HL_rand_all_A[j,i] = HL_rand_all_A[i,j]
-        D = np.zeros((N//2,N//2))
-        for i in range(N//2):
-            D[i,i]=sum(HL_rand_all_A[i,:]) + m_squared
-
-        HL_rand_all_pos = D - HL_rand_all_A
-        HL_rand_all = np.block([[HL_rand_all_pos,np.zeros((N//2,N//2))],
-                       [np.zeros((N//2,N//2)),HL_rand_all_mom]])
-
-        HL = HL
-        """
-        #Gamma_reconstructed, nu, eps_reconstructed = build_thermal_state_from_modular_hamiltonian(HL)
-
-        #Gamma_TFD = gaussian_purification(Gamma_reconstructed)
         V = build_ring_potential(N//2, k, m_squared)
         
-        Gamma_TFD = tfd_cov_ring_from_normal_modes(N//2, k, m_squared, V, beta=1, eps_omega=1e-15)
+        Gamma_TFD = tfd_cov_ring_from_normal_modes(N//2, k, m_squared, V, beta, eps_omega=1e-15)
 
 
 
@@ -1670,15 +1634,17 @@ n = 10
 insert_idx = 1
 
 # ring
-t_evolve = 3.63
-t_evolve_full = 4.63
+#t_evolve = 3.63
+#t_evolve_full = 4.63
+t_evolve = 2.64
+t_evolve_full = 2.37
 t0 = t_evolve_full*1.2
 coupling=True
 wormhole=False
 
 
 
-t_couple = 3
+t_couple = 3.36
 
 
 
@@ -1694,7 +1660,8 @@ H_coupling = H_coupling(n)
 
 
 k = 5
-m_squared = 1
+m_squared = 4
+beta = .3
 HL = np.zeros((2*n,2*n))
 
 for i in range(2*n):
@@ -1712,7 +1679,7 @@ for i in range(2*n):
 
 V = build_ring_potential(n, k, m_squared)
         
-Gamma_TFD = tfd_cov_ring_from_normal_modes(n, k, m_squared, V, beta=1, eps_omega=1e-15)
+Gamma_TFD = tfd_cov_ring_from_normal_modes(n, k, m_squared, V, beta, eps_omega=1e-15)
 
 S_1, S_2, S_12 = [0], [], [0]
 for r in range(1, n):
