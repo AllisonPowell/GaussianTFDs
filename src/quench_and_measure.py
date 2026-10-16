@@ -1130,42 +1130,7 @@ def teleportation_protocol(s,theta,insert_idx,wormhole,n_one_side,H_coupling,cou
                 HL[i,i] = m_squared + 2 * k 
             if i > N//2-1:
                 HL[i,i] = 1
-        """
-        HL_rand=np.zeros((N,N))
-        for i in range(N):
-            a = np.random.uniform(.2,2)
-            if i < N//2-1:
-                HL_rand[i, i] += m_squared + a   # on-site + two neighbors
-                HL_rand[i+1, i+1] += a
-                HL_rand[i,i+1] = -a
-                HL_rand[i+1, i] = -a
-      
-            if i == N//2-1:
-                HL_rand[i,0] = -a
-                HL_rand[0,i] = -a
-                HL_rand[i,i] += m_squared + a
-                HL_rand[0,0] += a
-            if i > N//2-1:
-                HL_rand[i,i] = 2.5
 
-
-        HL_rand_all_A = np.zeros((N//2,N//2))
-        HL_rand_all_mom = 2.5*np.eye(N//2)
-
-        for i in range(N//2):
-            for j in range(N//2):
-                HL_rand_all_A[i,j] = np.random.uniform(.1,2)
-                HL_rand_all_A[j,i] = HL_rand_all_A[i,j]
-        D = np.zeros((N//2,N//2))
-        for i in range(N//2):
-            D[i,i]=sum(HL_rand_all_A[i,:]) + m_squared
-
-        HL_rand_all_pos = D - HL_rand_all_A
-        HL_rand_all = np.block([[HL_rand_all_pos,np.zeros((N//2,N//2))],
-                       [np.zeros((N//2,N//2)),HL_rand_all_mom]])
-
-        HL = HL
-        """
         #Gamma_reconstructed, nu, eps_reconstructed = build_thermal_state_from_modular_hamiltonian(HL)
 
         #Gamma_TFD = gaussian_purification(Gamma_reconstructed)

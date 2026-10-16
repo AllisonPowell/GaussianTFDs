@@ -660,7 +660,7 @@ def H_coupling(N):
         x_L = bdy_1_idx[j]
         x_R = bdy_2_idx[j]
         # x coupling
-        H_coupling_OG[x_L, x_R] = H_coupling_OG[x_R, x_L] = mu*omega0 / 2
+        H_coupling_OG[x_L, x_R] = H_coupling_OG[x_R, x_L] = mu*omega0/2
         # p coupling
         H_coupling_OG[x_L + n_total, x_R + n_total] = H_coupling_OG[x_R + n_total, x_L + n_total] = mu / (2*omega0)
     """
@@ -885,7 +885,7 @@ def make_boundary_coupling(n, insert_idx, g):
     return G
 
 def two_sided_state(n,HL,t):
-    Gamma_0 = np.zeros((2*n,2*n))
+    Gamma_0 = .5*np.eye(2*n)
     Omega = symplectic_form(n)
     S_t = expm(Omega @ HL * t)
     Gamma_t = S_t @ Gamma_0 @ S_t.T
@@ -902,6 +902,59 @@ def two_sided_state(n,HL,t):
     Gamma_TFD[np.ix_(range(3*n, 4*n), range(3*n, 4*n))] = Gamma_t[n:, n:]
 
     return Gamma_TFD
+
+import numpy as np
+
+
+def negativity(Gamma, sites_A, sites_B, tol=1e-12):
+    """
+    Logarithmic negativity E_N and negativity N between two sets of modes
+    of a Gaussian state.
+
+    Conventions (same as the rest of the code):
+      * Gamma is a real symmetric 2n x 2n covariance matrix in xxpp ordering,
+        (x_0, ..., x_{n-1}, p_0, ..., p_{n-1}), where n is the total number of
+        modes (including the observer, if present).
+      * The vacuum covariance is I/2, so the physical bound is nu >= 1/2.
+      * sites_A, sites_B are lists of mode indices (0..n-1). Modes in neither
+        list are traced out. They must not overlap.
+
+    Returns (E_N, N) with E_N in nats:
+      E_N = sum_k max(0, -ln(2 * nu_tilde_k))
+      N   = (exp(E_N) - 1) / 2
+    where nu_tilde_k are the symplectic eigenvalues of the partially
+    transposed covariance matrix.
+    """
+    Gamma = np.asarray(Gamma, dtype=float)
+    n = Gamma.shape[0] // 2
+    A = [int(i) for i in sites_A]
+    B = [int(i) for i in sites_B]
+    if set(A) & set(B):
+        raise ValueError("sites_A and sites_B must be disjoint")
+    if not A or not B:
+        return 0.0, 0.0
+
+    modes = A + B
+    nA, m = len(A), len(modes)
+
+    # Reduced covariance on A u B, ordered (x_A, x_B, p_A, p_B).
+    idx = modes + [i + n for i in modes]
+    G = Gamma[np.ix_(idx, idx)]
+    G = 0.5 * (G + G.T)
+
+    # Partial transpose on B: p_B -> -p_B.
+    flip = np.ones(2 * m)
+    flip[m + nA:] = -1.0
+    G_pt = flip[:, None] * G * flip[None, :]
+
+    # Symplectic eigenvalues: |eigenvalues of i*Omega*G_pt|, each appears twice.
+    Omega = np.block([[np.zeros((m, m)), np.eye(m)],
+                      [-np.eye(m), np.zeros((m, m))]])
+    ev = np.sort(np.abs(np.linalg.eigvals(1j * Omega @ G_pt)))
+    nu_tilde = ev[::2]
+
+    E_N = float(np.sum(np.maximum(0.0, -np.log(2.0 * np.maximum(nu_tilde, tol)))))
+    return E_N, float((np.exp(E_N) - 1.0) / 2.0)
 
 
 def teleportation_protocol(s,theta,insert_idx,n_one_side,H_coupling,coupling,t_evolve,t_couple,entanglement=True):
@@ -929,8 +982,8 @@ def teleportation_protocol(s,theta,insert_idx,n_one_side,H_coupling,coupling,t_e
 
     V = build_ring_potential(N//2, k, m_squared)
 
-    #Gamma_TFD = tfd_cov_ring_from_normal_modes(N//2, k, m_squared, V, beta, entanglement,eps_omega=1e-15)
-    Gamma_TFD = two_sided_state(N//2,HL,10)
+    Gamma_TFD = tfd_cov_ring_from_normal_modes(N//2, k, m_squared, V, beta, entanglement,eps_omega=1e-15)
+    #Gamma_TFD = two_sided_state(N//2,HL,10)
 
 
 
@@ -1561,8 +1614,8 @@ insert_idx = 1
 #t_evolve = 3.63
 #t_evolve_full = 4.63
 
-# harmonic chain TFD
-"""
+# harmonic chain TFD x^2+p^2
+
 t_evolve_single_tfd = 2.15
 t_evolve_full_tfd = 3.39
 t_evolve_fid_tfd = 2.59
@@ -1583,16 +1636,41 @@ t_couple_fid_tfd = 3.55
 t_couple_single_prod = 3.25
 t_couple_full_prod = 3.14
 t_couple_fid_prod = 3
+
+
+# harmonic chain TFD x^2
 """
+t_evolve_single_tfd = 1.84
+t_evolve_full_tfd = 2.94
+t_evolve_fid_tfd = 2.06
+t_evolve_single_prod = 1.84
+t_evolve_full_prod = 2.99
+t_evolve_fid_prod = 2.06
+t0 = t_evolve_full_tfd*1.2
+coupling=True
+entanglement = True
+
+
+
+t_couple = 3.36
+
+t_couple_single_tfd = 3.44
+t_couple_full_tfd = 3.69
+t_couple_fid_tfd = 2.42
+t_couple_single_prod = 3.44
+t_couple_full_prod = 3.14
+t_couple_fid_prod = 2.7
+"""
+
 
 # two-sided intial state
-
+"""
 t_evolve_single_tfd = 2.15
-t_evolve_full_tfd = 3.39
-t_evolve_fid_tfd = 2.59
-t_evolve_single_prod = 2.11
-t_evolve_full_prod = 1.36
-t_evolve_fid_prod = 2.33
+t_evolve_full_tfd = 3.52
+t_evolve_fid_tfd = 2.46
+t_evolve_single_prod = 2.15
+t_evolve_full_prod = 3.52
+t_evolve_fid_prod = 2.46
 t0 = t_evolve_full_tfd*1.2
 coupling=True
 entanglement = True
@@ -1602,12 +1680,12 @@ entanglement = True
 t_couple = 3.36
 
 t_couple_single_tfd = 3.61
-t_couple_full_tfd = 3.25
-t_couple_fid_tfd = 3.55
-t_couple_single_prod = 3.25
+t_couple_full_tfd = 3.14
+t_couple_fid_tfd = 3.08
+t_couple_single_prod = 3.61
 t_couple_full_prod = 3.14
-t_couple_fid_prod = 3
-
+t_couple_fid_prod = 3.08
+"""
 
 
 
@@ -1752,6 +1830,11 @@ mi_single_tfd_list = []
 mi_full_prod_list = []
 mi_single_prod_list = []
 
+neg_full_tfd_list = []
+neg_single_tfd_list = []
+neg_full_prod_list = []
+neg_single_prod_list = []
+
 for i in range(len(sites)):
     mi_full_tfd = mutual_information(Gamma_final_obs_full_tfd,[2*n],[sites[i]])
     mi_full_tfd*= 1/(mutual_information(Gamma_final_obs_full_tfd,[2*n],list(range(0,2*n))))
@@ -1769,14 +1852,40 @@ for i in range(len(sites)):
     mi_single_prod*= 1/(mutual_information(Gamma_final_obs_single_prod,[2*n],list(range(0,2*n))))
     mi_single_prod_list.append(mi_single_prod)
 
+
+    _,neg_full_tfd = negativity(Gamma_final_obs_full_tfd,[2*n],[sites[i]])
+    _,neg_norm = negativity(Gamma_final_obs_full_tfd,[2*n],list(range(0,2*n)))
+    neg_full_tfd*= 1/neg_norm
+    neg_full_tfd_list.append(neg_full_tfd)
+
+    _,neg_single_tfd = negativity(Gamma_final_obs_single_tfd,[2*n],[sites[i]]) 
+    _,neg_norm = negativity(Gamma_final_obs_single_tfd,[2*n],list(range(0,2*n)))
+    neg_single_tfd*= 1/neg_norm
+    neg_single_tfd_list.append(neg_single_tfd)
+    
+    _,neg_full_prod = negativity(Gamma_final_obs_full_prod,[2*n],[sites[i]])
+    _,neg_norm = negativity(Gamma_final_obs_full_prod,[2*n],list(range(0,2*n)))
+    neg_full_prod*= 1/neg_norm
+    neg_full_prod_list.append(neg_full_prod)
+
+    _,neg_single_prod = negativity(Gamma_final_obs_single_prod,[2*n],[sites[i]])
+    _,neg_norm = negativity(Gamma_final_obs_single_prod,[2*n],list(range(0,2*n)))
+    neg_single_prod*= 1/neg_norm
+    neg_single_prod_list.append(neg_single_prod)
+
 #plt.plot(sites,Fs,label="symplectic")
 plt.rc('font', size=14)
-plt.plot(sites,fidelity,"ko",linewidth=2,label="fidelity (tfd)")
-plt.plot(sites,mi_single_tfd_list,"bo",linewidth=2,label="mutual information single site (tfd)")
-plt.plot(sites,mi_full_tfd_list,"ro",markerfacecolor="None",linewidth=2,label="mutual information full side (tfd)")
-plt.plot(sites,fidelity_prod,'o',color="orange",linewidth=2,label="fidelity")
-plt.plot(sites,mi_single_prod_list,"go",linewidth=2,label="mutual information single site (prod)")
-plt.plot(sites,mi_full_prod_list,"mo",markerfacecolor="None",linewidth=2,label="mutual information full side (prod)")
+#plt.plot(sites,fidelity,"ko",linewidth=2,label="fidelity (tfd)")
+#plt.plot(sites,mi_single_tfd_list,"bo",linewidth=2,label="mutual information single site (tfd)")
+#plt.plot(sites,mi_full_tfd_list,"ro",markerfacecolor="None",linewidth=2,label="mutual information full side (tfd)")
+#plt.plot(sites,fidelity_prod,'o',color="orange",linewidth=2,label="fidelity")
+#plt.plot(sites,mi_single_prod_list,"go",linewidth=2,label="mutual information single site (prod)")
+#plt.plot(sites,mi_full_prod_list,"mo",markerfacecolor="None",linewidth=2,label="mutual information full side (prod)")
+
+plt.plot(sites,neg_single_tfd_list,"o",color="coral",linewidth=2,label="neg single site (tfd)")
+plt.plot(sites,neg_full_tfd_list,"o",color="cyan",markerfacecolor="None",linewidth=2,label="neg full side (tfd)")
+plt.plot(sites,neg_single_prod_list,"o",color="darkslateblue",linewidth=2,label="neg single site (prod)")
+plt.plot(sites,neg_full_prod_list,"o",color = "mediumslateblue",markerfacecolor="None",linewidth=2,label="neg full side (prod)")
 
 
 plt.axvline(insert_idx,color="m",linestyle="dashed",linewidth=2,label="insert site")
@@ -1861,6 +1970,15 @@ mi_evolve_full_prod_list = []
 mi_evolve_single_prod_list = []
 mi_couple_full_prod_list = []
 mi_couple_single_prod_list = []
+
+negativity_evolve_full_tfd_list = []
+
+negativity_single_tfd_list = [[] for _ in range(n)]
+
+negativity_evolve_full_prod_list = []
+
+negativity_single_prod_list = [[] for _ in range(n)]
+
 
 s=1
 theta = np.pi/2
