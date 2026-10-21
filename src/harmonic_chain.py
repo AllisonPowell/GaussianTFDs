@@ -875,6 +875,56 @@ def make_boundary_coupling(n, insert_idx, g):
 
     return G
 
+def negativity(Gamma, sites_A, sites_B, tol=1e-12):
+    """
+    Logarithmic negativity E_N and negativity N between two sets of modes
+    of a Gaussian state.
+
+    Conventions (same as the rest of the code):
+      * Gamma is a real symmetric 2n x 2n covariance matrix in xxpp ordering,
+        (x_0, ..., x_{n-1}, p_0, ..., p_{n-1}), where n is the total number of
+        modes (including the observer, if present).
+      * The vacuum covariance is I/2, so the physical bound is nu >= 1/2.
+      * sites_A, sites_B are lists of mode indices (0..n-1). Modes in neither
+        list are traced out. They must not overlap.
+
+    Returns (E_N, N) with E_N in nats:
+      E_N = sum_k max(0, -ln(2 * nu_tilde_k))
+      N   = (exp(E_N) - 1) / 2
+    where nu_tilde_k are the symplectic eigenvalues of the partially
+    transposed covariance matrix.
+    """
+    Gamma = np.asarray(Gamma, dtype=float)
+    n = Gamma.shape[0] // 2
+    A = [int(i) for i in sites_A]
+    B = [int(i) for i in sites_B]
+    if set(A) & set(B):
+        raise ValueError("sites_A and sites_B must be disjoint")
+    if not A or not B:
+        return 0.0, 0.0
+
+    modes = A + B
+    nA, m = len(A), len(modes)
+
+    # Reduced covariance on A u B, ordered (x_A, x_B, p_A, p_B).
+    idx = modes + [i + n for i in modes]
+    G = Gamma[np.ix_(idx, idx)]
+    G = 0.5 * (G + G.T)
+
+    # Partial transpose on B: p_B -> -p_B.
+    flip = np.ones(2 * m)
+    flip[m + nA:] = -1.0
+    G_pt = flip[:, None] * G * flip[None, :]
+
+    # Symplectic eigenvalues: |eigenvalues of i*Omega*G_pt|, each appears twice.
+    Omega = np.block([[np.zeros((m, m)), np.eye(m)],
+                      [-np.eye(m), np.zeros((m, m))]])
+    ev = np.sort(np.abs(np.linalg.eigvals(1j * Omega @ G_pt)))
+    nu_tilde = ev[::2]
+
+    E_N = float(np.sum(np.maximum(0.0, -np.log(2.0 * np.maximum(nu_tilde, tol)))))
+    return E_N, float((np.exp(E_N) - 1.0) / 2.0)
+
 
 def teleportation_protocol(s,theta,insert_idx,wormhole,n_one_side,H_coupling,coupling,t_evolve,t_couple):
     q = insert_idx
@@ -1754,6 +1804,8 @@ Gamma_final_obs_full, _, _, _=teleportation_protocol(
 
 mi_full_list = []
 mi_single_list = []
+neg_full_list = []
+neg_single_list = []
 
 for i in range(len(sites)):
     mi_full = mutual_information(Gamma_final_obs_full,[2*n],[sites[i]])
@@ -1764,6 +1816,15 @@ for i in range(len(sites)):
     mi_single*= 1/(mutual_information(Gamma_final_obs_single,[2*n],list(range(0,2*n))))
     mi_single_list.append(mi_single)
 
+    _,neg_full = negativity(Gamma_final_obs_full_tfd,[2*n],[sites[i]])
+    _,neg_norm = negativity(Gamma_final_obs_full_tfd,[2*n],list(range(0,2*n)))
+    neg_full*= 1/neg_norm
+    neg_full_list.append(neg_full_tfd)
+
+    _,neg_single = negativity(Gamma_final_obs_single_tfd,[2*n],[sites[i]]) 
+    _,neg_norm = negativity(Gamma_final_obs_single_tfd,[2*n],list(range(0,2*n)))
+    neg_single*= 1/neg_norm
+    neg_single_list.append(neg_single_tfd)
 
 #plt.plot(sites,Fs,label="symplectic")
 plt.rc('font', size=14)
