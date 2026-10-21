@@ -643,7 +643,7 @@ def H_coupling(N):
     H_coupling_OG = np.zeros((2*n_total, 2*n_total))
     mu = 1
     k = 5
-    m_squared = 4
+    m_squared = 13
     omega0 = np.sqrt(m_squared + 2*k)
     #omega0=1
 
@@ -932,8 +932,8 @@ def teleportation_protocol(s,theta,insert_idx,wormhole,n_one_side,H_coupling,cou
     if wormhole == False:
         N = 2*n_one_side
         k = 5
-        m_squared = 4
-        beta = .3
+        m_squared = 13
+        beta = 1
         HL = np.zeros((N,N))
         
         for i in range(N):
@@ -1684,10 +1684,10 @@ n = 10
 insert_idx = 1
 
 # ring
-#t_evolve = 3.63
-#t_evolve_full = 4.63
-t_evolve = 2.64
-t_evolve_full = 2.37
+t_evolve = 3.63
+t_evolve_full = 4.63
+#t_evolve = 2.64
+#t_evolve_full = 2.37
 t0 = t_evolve_full*1.2
 coupling=True
 wormhole=False
@@ -1710,8 +1710,12 @@ H_coupling = H_coupling(n)
 
 
 k = 5
-m_squared = 4
-beta = .3
+#m_squared = 4
+#beta = .3
+
+m_squared = 13
+beta = 1
+
 HL = np.zeros((2*n,2*n))
 
 for i in range(2*n):
@@ -1816,21 +1820,23 @@ for i in range(len(sites)):
     mi_single*= 1/(mutual_information(Gamma_final_obs_single,[2*n],list(range(0,2*n))))
     mi_single_list.append(mi_single)
 
-    _,neg_full = negativity(Gamma_final_obs_full_tfd,[2*n],[sites[i]])
-    _,neg_norm = negativity(Gamma_final_obs_full_tfd,[2*n],list(range(0,2*n)))
+    _,neg_full = negativity(Gamma_final_obs_full,[2*n],[sites[i]])
+    _,neg_norm = negativity(Gamma_final_obs_full,[2*n],list(range(0,2*n)))
     neg_full*= 1/neg_norm
-    neg_full_list.append(neg_full_tfd)
+    neg_full_list.append(neg_full)
 
-    _,neg_single = negativity(Gamma_final_obs_single_tfd,[2*n],[sites[i]]) 
-    _,neg_norm = negativity(Gamma_final_obs_single_tfd,[2*n],list(range(0,2*n)))
+    _,neg_single = negativity(Gamma_final_obs_single,[2*n],[sites[i]]) 
+    _,neg_norm = negativity(Gamma_final_obs_single,[2*n],list(range(0,2*n)))
     neg_single*= 1/neg_norm
-    neg_single_list.append(neg_single_tfd)
+    neg_single_list.append(neg_single)
 
 #plt.plot(sites,Fs,label="symplectic")
 plt.rc('font', size=14)
-plt.plot(sites,fidelity,"bo",linewidth=2,label="fidelity")
-plt.plot(sites,mi_single_list,"ro",linewidth=2,label="mutual information fidelity time")
-plt.plot(sites,mi_full_list,"ko",markerfacecolor="None",linewidth=2,label="mutual information full side time")
+plt.plot(sites,fidelity,"ko",linewidth=2,label="fidelity")
+plt.plot(sites,mi_single_list,"bo",linewidth=2,label="mutual information fidelity time")
+plt.plot(sites,mi_full_list,"ro",markerfacecolor="None",linewidth=2,label="mutual information full side time")
+plt.plot(sites,neg_single_list,"o",color="cyan",linewidth=2,label="neg single site (prod)")
+plt.plot(sites,neg_full_list,"o",color = "orange",markerfacecolor="None",linewidth=2,label="neg full side (prod)")
 
 
 plt.axvline(insert_idx,color="m",linestyle="dashed",linewidth=2,label="insert site")
