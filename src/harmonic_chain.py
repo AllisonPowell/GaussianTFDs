@@ -923,7 +923,7 @@ def negativity(Gamma, sites_A, sites_B, tol=1e-12):
     nu_tilde = ev[::2]
 
     E_N = float(np.sum(np.maximum(0.0, -np.log(2.0 * np.maximum(nu_tilde, tol)))))
-    return E_N, float((np.exp(E_N) - 1.0) / 2.0)
+    return float((np.exp(E_N) - 1.0) / 2.0)
 
 
 def teleportation_protocol(s,theta,insert_idx,wormhole,n_one_side,H_coupling,coupling,t_evolve,t_couple):
@@ -1652,6 +1652,73 @@ def mut_info_segments(Gamma_TFD,Gamma_LR_observer):
 
     return mut_info_insert_regions,mut_info_telep_regions,full_lengths_array
 
+
+
+
+def neg_segments(Gamma_TFD,Gamma_LR_observer):
+    observer_idx = Gamma_TFD.shape[0]//2
+    neg_insert_regions = []
+    neg_telep_regions = []
+
+    lengths_array = np.linspace(1,Gamma_TFD.shape[0] // 8,Gamma_TFD.shape[0] // 8)
+    center_idx = Gamma_TFD.shape[0] // 8
+    center_idx = 1
+
+    for i in range(1,lengths_array.shape[0]):
+        #if i == 0:
+        #segment_telep = [teleported_idx]
+        if center_idx - i >= 0 and center_idx + i < Gamma_TFD.shape[0]//4:
+            segment_insert = np.arange(center_idx - i, center_idx + i+1)
+        if center_idx - i < 0:
+            diff = np.abs(center_idx - i)
+            segment_insert_1 = np.arange(Gamma_TFD.shape[0]//4-diff,Gamma_TFD.shape[0]//4)
+            segment_insert_2 = np.arange(0,center_idx+i+1)
+            segment_insert = np.concatenate((segment_insert_1,segment_insert_2))
+        if center_idx + i >= Gamma_TFD.shape[0]//4:
+            diff = center_idx + i - Gamma_TFD.shape[0]//4
+            segment_insert_1 = np.arange(center_idx-i,Gamma_TFD.shape[0]//4)
+            segment_insert_2 = np.arange(0,diff+1)
+            segment_insert = np.concatenate((segment_insert_1,segment_insert_2))
+        segment_insert = np.ndarray.tolist(segment_insert)
+        neg_insert_regions.append(negativity(Gamma_LR_observer,[observer_idx],segment_insert))
+        if center_idx  - i >= 0  and center_idx  + i < Gamma_TFD.shape[0]//4:
+            segment_telep = np.arange(center_idx + Gamma_TFD.shape[0]//4 - i, center_idx + Gamma_TFD.shape[0]//4 + i+1)
+        if center_idx - i < 0 :
+            diff = np.abs(center_idx - i)
+            segment_telep_1 = np.arange(Gamma_TFD.shape[0]//2-diff,Gamma_TFD.shape[0]//2)
+            segment_telep_2 = np.arange(Gamma_TFD.shape[0] // 4 ,center_idx + Gamma_TFD.shape[0] // 4 + i+1)
+            segment_telep = np.concatenate((segment_telep_1,segment_telep_2))
+        if center_idx + i >= Gamma_TFD.shape[0]//4:
+            diff = center_idx + i - Gamma_TFD.shape[0]//4
+            segment_telep_1 = np.arange(center_idx + Gamma_TFD.shape[0] // 4 - i,Gamma_TFD.shape[0]//2)
+            segment_telep_2 = np.arange(Gamma_TFD.shape[0] // 4,Gamma_TFD.shape[0] //4 + diff+1)
+            segment_telep = np.concatenate((segment_telep_1,segment_telep_2))
+        segment_telep = np.ndarray.tolist(segment_telep)
+        neg_telep_regions.append(negativity(Gamma_LR_observer, [observer_idx], segment_telep))
+
+
+
+    neg_insert_regions.append(negativity(Gamma_LR_observer, [observer_idx], list(range(n))))
+    neg_telep_regions.append(negativity(Gamma_LR_observer,[observer_idx],list(range(n,2*n))))
+
+    neg_total = negativity(Gamma_LR_observer,[observer_idx],list(range(2*n)))
+    neg_insert_regions=np.array(neg_insert_regions)
+    neg_telep_regions=np.array(neg_telep_regions)
+
+    neg_insert_regions*=1/neg_total
+    neg_telep_regions*=1/neg_total
+
+
+    full_lengths_array = 2 * lengths_array + 1
+    full_lengths_array[-1] = n
+
+    return neg_insert_regions,neg_telep_regions,full_lengths_array
+
+
+
+
+
+
 def heisenberg_evolution_operator(H, t, n):
     Omega = symplectic_form(n)
     return expm(Omega @ H * t)
@@ -1820,13 +1887,13 @@ for i in range(len(sites)):
     mi_single*= 1/(mutual_information(Gamma_final_obs_single,[2*n],list(range(0,2*n))))
     mi_single_list.append(mi_single)
 
-    _,neg_full = negativity(Gamma_final_obs_full,[2*n],[sites[i]])
-    _,neg_norm = negativity(Gamma_final_obs_full,[2*n],list(range(0,2*n)))
+    neg_full = negativity(Gamma_final_obs_full,[2*n],[sites[i]])
+    neg_norm = negativity(Gamma_final_obs_full,[2*n],list(range(0,2*n)))
     neg_full*= 1/neg_norm
     neg_full_list.append(neg_full)
 
-    _,neg_single = negativity(Gamma_final_obs_single,[2*n],[sites[i]]) 
-    _,neg_norm = negativity(Gamma_final_obs_single,[2*n],list(range(0,2*n)))
+    neg_single = negativity(Gamma_final_obs_single,[2*n],[sites[i]]) 
+    neg_norm = negativity(Gamma_final_obs_single,[2*n],list(range(0,2*n)))
     neg_single*= 1/neg_norm
     neg_single_list.append(neg_single)
 
@@ -1845,6 +1912,19 @@ plt.xlabel("Site")
 plt.ylabel("Fidelity")
 #plt.title("Channel Fidelity")
 #plt.legend()
+plt.show()
+
+
+neg_insert_regions_full,neg_telep_regions_full,full_lengths_array = neg_segments(Gamma_TFD,Gamma_final_obs_full)
+neg_insert_regions_single,neg_telep_regions_single,_= neg_segments(Gamma_TFD,Gamma_final_obs_single)
+
+plt.plot(full_lengths_array,neg_insert_regions_full,'ro',linewidth=2,label = "insert side mutual info")
+plt.plot(full_lengths_array,neg_telep_regions_full,'rs',linewidth=2, label ="teleport side mutual info")
+plt.plot(full_lengths_array,neg_insert_regions_single,'bo',markerfacecolor='None',linewidth=2,label = "insert side fidelity")
+plt.plot(full_lengths_array,neg_telep_regions_single,'bs',markerfacecolor='None',linewidth=2, label ="teleport side fidelity")
+
+plt.xlabel("Length of Segment")
+plt.ylabel("Negativity with Observer")
 plt.show()
 
 
@@ -2022,8 +2102,10 @@ fig.colorbar(im, ax=axs[0,1],orientation='vertical', label=r'$|S_t(r_i(0))|$')
 
 
 axs[1,0].plot(sites,fidelity,"ko",linewidth=2,label="fidelity")
-axs[1,0].plot(sites,mi_full_list,"ro",linewidth=2,label="mutual information full side time")
-axs[1,0].plot(sites,mi_single_list,"bo",markerfacecolor="None",linewidth=2,label="mutual information fidelity time")
+axs[1,0].plot(sites,mi_full_list,"ro",markerfacecolor="None",linewidth=2,label="mutual information full side time")
+axs[1,0].plot(sites,mi_single_list,"bo",linewidth=2,label="mutual information fidelity time")
+axs[1,0].plot(sites,neg_single_list,"o",color="cyan",linewidth=2,label="neg single site (prod)")
+axs[1,0].plot(sites,neg_full_list,"o",color = "orange",markerfacecolor="None",linewidth=2,label="neg full side (prod)")
 
 
 axs[1,0].axvline(insert_idx,color="m",linestyle="dashed",linewidth=2,label="insert site")
@@ -2055,6 +2137,17 @@ for ax, label in zip(axs.flat, labels):
         ha="right",  # Horizontal alignment
     )
 plt.show()
+
+
+
+
+
+
+
+
+
+
+
 
 print("stop")
 

@@ -2335,7 +2335,7 @@ for s in range(len(sizes)):
 
 
 
-"""
+
 plt.rc('font', size=14)
 #plt.plot(sizes,channel_fidelities_symp,label="symplectic")
 plt.plot(sizes,channel_fidelities_flip,"ko",linewidth=2,label="many-body")
@@ -2367,7 +2367,7 @@ plt.ylabel("fidelity")
 plt.title("Standard Protocol")
 plt.legend()
 plt.show()
-"""
+
 """
 fid_noisy = []
 noise_mat = np.array([[1,1],[1,1]])

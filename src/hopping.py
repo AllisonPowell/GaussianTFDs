@@ -1610,6 +1610,118 @@ def operator_spread_over_time(H, t_list, op_index=0):
 
     return np.array(coeffs_t)  # shape: (len(t_list), 2n)
 
+def negativity(Gamma, sites_A, sites_B, tol=1e-12):
+    """
+    Logarithmic negativity E_N and negativity N between two sets of modes
+    of a Gaussian state.
+
+    Conventions (same as the rest of the code):
+      * Gamma is a real symmetric 2n x 2n covariance matrix in xxpp ordering,
+        (x_0, ..., x_{n-1}, p_0, ..., p_{n-1}), where n is the total number of
+        modes (including the observer, if present).
+      * The vacuum covariance is I/2, so the physical bound is nu >= 1/2.
+      * sites_A, sites_B are lists of mode indices (0..n-1). Modes in neither
+        list are traced out. They must not overlap.
+
+    Returns (E_N, N) with E_N in nats:
+      E_N = sum_k max(0, -ln(2 * nu_tilde_k))
+      N   = (exp(E_N) - 1) / 2
+    where nu_tilde_k are the symplectic eigenvalues of the partially
+    transposed covariance matrix.
+    """
+    Gamma = np.asarray(Gamma, dtype=float)
+    n = Gamma.shape[0] // 2
+    A = [int(i) for i in sites_A]
+    B = [int(i) for i in sites_B]
+    if set(A) & set(B):
+        raise ValueError("sites_A and sites_B must be disjoint")
+    if not A or not B:
+        return 0.0, 0.0
+
+    modes = A + B
+    nA, m = len(A), len(modes)
+
+    # Reduced covariance on A u B, ordered (x_A, x_B, p_A, p_B).
+    idx = modes + [i + n for i in modes]
+    G = Gamma[np.ix_(idx, idx)]
+    G = 0.5 * (G + G.T)
+
+    # Partial transpose on B: p_B -> -p_B.
+    flip = np.ones(2 * m)
+    flip[m + nA:] = -1.0
+    G_pt = flip[:, None] * G * flip[None, :]
+
+    # Symplectic eigenvalues: |eigenvalues of i*Omega*G_pt|, each appears twice.
+    Omega = np.block([[np.zeros((m, m)), np.eye(m)],
+                      [-np.eye(m), np.zeros((m, m))]])
+    ev = np.sort(np.abs(np.linalg.eigvals(1j * Omega @ G_pt)))
+    nu_tilde = ev[::2]
+
+    E_N = float(np.sum(np.maximum(0.0, -np.log(2.0 * np.maximum(nu_tilde, tol)))))
+    return float((np.exp(E_N) - 1.0) / 2.0)
+
+
+
+
+def neg_segments(Gamma_TFD,Gamma_LR_observer):
+    observer_idx = Gamma_TFD.shape[0]//2
+    neg_insert_regions = []
+    neg_telep_regions = []
+
+    lengths_array = np.linspace(1,Gamma_TFD.shape[0] // 8,Gamma_TFD.shape[0] // 8)
+    center_idx = Gamma_TFD.shape[0] // 8
+    center_idx = 1
+
+    for i in range(1,lengths_array.shape[0]):
+        #if i == 0:
+        #segment_telep = [teleported_idx]
+        if center_idx - i >= 0 and center_idx + i < Gamma_TFD.shape[0]//4:
+            segment_insert = np.arange(center_idx - i, center_idx + i+1)
+        if center_idx - i < 0:
+            diff = np.abs(center_idx - i)
+            segment_insert_1 = np.arange(Gamma_TFD.shape[0]//4-diff,Gamma_TFD.shape[0]//4)
+            segment_insert_2 = np.arange(0,center_idx+i+1)
+            segment_insert = np.concatenate((segment_insert_1,segment_insert_2))
+        if center_idx + i >= Gamma_TFD.shape[0]//4:
+            diff = center_idx + i - Gamma_TFD.shape[0]//4
+            segment_insert_1 = np.arange(center_idx-i,Gamma_TFD.shape[0]//4)
+            segment_insert_2 = np.arange(0,diff+1)
+            segment_insert = np.concatenate((segment_insert_1,segment_insert_2))
+        segment_insert = np.ndarray.tolist(segment_insert)
+        neg_insert_regions.append(negativity(Gamma_LR_observer,[observer_idx],segment_insert))
+        if center_idx  - i >= 0  and center_idx  + i < Gamma_TFD.shape[0]//4:
+            segment_telep = np.arange(center_idx + Gamma_TFD.shape[0]//4 - i, center_idx + Gamma_TFD.shape[0]//4 + i+1)
+        if center_idx - i < 0 :
+            diff = np.abs(center_idx - i)
+            segment_telep_1 = np.arange(Gamma_TFD.shape[0]//2-diff,Gamma_TFD.shape[0]//2)
+            segment_telep_2 = np.arange(Gamma_TFD.shape[0] // 4 ,center_idx + Gamma_TFD.shape[0] // 4 + i+1)
+            segment_telep = np.concatenate((segment_telep_1,segment_telep_2))
+        if center_idx + i >= Gamma_TFD.shape[0]//4:
+            diff = center_idx + i - Gamma_TFD.shape[0]//4
+            segment_telep_1 = np.arange(center_idx + Gamma_TFD.shape[0] // 4 - i,Gamma_TFD.shape[0]//2)
+            segment_telep_2 = np.arange(Gamma_TFD.shape[0] // 4,Gamma_TFD.shape[0] //4 + diff+1)
+            segment_telep = np.concatenate((segment_telep_1,segment_telep_2))
+        segment_telep = np.ndarray.tolist(segment_telep)
+        neg_telep_regions.append(negativity(Gamma_LR_observer, [observer_idx], segment_telep))
+
+
+
+    neg_insert_regions.append(negativity(Gamma_LR_observer, [observer_idx], list(range(n))))
+    neg_telep_regions.append(negativity(Gamma_LR_observer,[observer_idx],list(range(n,2*n))))
+
+    neg_total = negativity(Gamma_LR_observer,[observer_idx],list(range(2*n)))
+    neg_insert_regions=np.array(neg_insert_regions)
+    neg_telep_regions=np.array(neg_telep_regions)
+
+    neg_insert_regions*=1/neg_total
+    neg_telep_regions*=1/neg_total
+
+
+    full_lengths_array = 2 * lengths_array + 1
+    full_lengths_array[-1] = n
+
+    return neg_insert_regions,neg_telep_regions,full_lengths_array
+
 
 
 
@@ -1757,7 +1869,17 @@ plt.ylabel("Fidelity")
 plt.show()
 
 
+neg_insert_regions_full,neg_telep_regions_full,full_lengths_array = neg_segments(Gamma_TFD,Gamma_final_obs_full)
+neg_insert_regions_single,neg_telep_regions_single,_= neg_segments(Gamma_TFD,Gamma_final_obs_single)
 
+plt.plot(full_lengths_array,neg_insert_regions_full,'ro',linewidth=2,label = "insert side mutual info")
+plt.plot(full_lengths_array,neg_telep_regions_full,'rs',linewidth=2, label ="teleport side mutual info")
+plt.plot(full_lengths_array,neg_insert_regions_single,'bo',markerfacecolor='None',linewidth=2,label = "insert side fidelity")
+plt.plot(full_lengths_array,neg_telep_regions_single,'bs',markerfacecolor='None',linewidth=2, label ="teleport side fidelity")
+
+plt.xlabel("Length of Segment")
+plt.ylabel("Negativity with Observer")
+plt.show()
 
 
 

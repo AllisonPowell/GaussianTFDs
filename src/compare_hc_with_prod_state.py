@@ -983,6 +983,7 @@ def negativity(Gamma, sites_A, sites_B, tol=1e-12):
 def teleportation_protocol(s,theta,insert_idx,n_one_side,H_coupling,coupling,t_evolve,t_couple,entanglement=True):
     q = insert_idx
     t0 = t_evolve
+    coupling = True
 
     N = 2*n_one_side
     k = 5
@@ -1636,7 +1637,7 @@ insert_idx = 1
 # ring x^2 + p^2
 #m^2 = 13
 #beta = 1
-"""
+
 
 t_evolve_single_tfd = 3.63
 t_evolve_full_tfd = 4.63
@@ -1657,7 +1658,7 @@ t_couple_single_prod = 3
 t_couple_full_prod = 3
 t_couple_fid_prod = 3
 
-"""
+
 # ring x^2
 #m^2 = 13
 #beta = 1
@@ -1733,7 +1734,7 @@ t_couple_fid_prod = 2.7
 """
 
 # two-sided intial state
-
+"""
 t_evolve_single_tfd = 2.11
 t_evolve_full_tfd = 2.33
 t_evolve_fid_tfd = 2.37
@@ -1754,7 +1755,7 @@ t_couple_fid_tfd = .25
 t_couple_single_prod = 1.51
 t_couple_full_prod = 1.49
 t_couple_fid_prod = .25
-
+"""
 
 
 
@@ -1821,6 +1822,14 @@ plt.tight_layout()
 plt.show()
 """
 
+Fs,fidelity_prod= fidelity_vs_site(
+    insert_idx,
+    input_ensemble,
+    H_coupling,
+    n,
+    t_evolve_fid_prod,
+    t_couple_fid_prod,
+    entanglement=False)
 
 
 Fs,fidelity= fidelity_vs_site(
@@ -1832,14 +1841,7 @@ Fs,fidelity= fidelity_vs_site(
     t_couple_fid_tfd,
     entanglement=True)
 
-Fs,fidelity_prod= fidelity_vs_site(
-    insert_idx,
-    input_ensemble,
-    H_coupling,
-    n,
-    t_evolve_fid_prod,
-    t_couple_fid_prod,
-    entanglement=False)
+
 
 """
 rows = zip(list(sites),list(Ff))

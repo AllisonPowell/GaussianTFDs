@@ -138,7 +138,7 @@ plt.show()
 # holes figure
 #######
 
-
+"""
 df_0 = pd.read_csv(f'{PROJ_DIR}/data/mi_distrib_0.csv', usecols=[0, 1, 2],header=None)
 
 sites = df_0[0]
@@ -225,7 +225,7 @@ for ax, label in zip(axs.flat, labels):
     )
 plt.show()
 
-
+"""
 
 ######
 # BKP vs Gaussian Oscillating
@@ -268,4 +268,80 @@ for ax, label in zip(axs.flat, labels):
     )
 plt.show()
 """
+
+df = pd.read_csv(f'{PROJ_DIR}/data/harmonic_chain_vary_beta.csv',header=None)
+beta = df[0]
+mi_full_ent = df[3]
+mi_full_no_ent = df[4]
+
+d_mi_full = mi_full_ent-mi_full_no_ent
+
+plt.plot(beta,d_mi_full,'ko')
+plt.xlabel("beta")
+plt.ylabel("mutual information difference")
+plt.show()
+
+
+neg_full_ent = df[7]
+neg_full_no_ent = df[8]
+
+d_neg_full = neg_full_ent-neg_full_no_ent
+
+plt.plot(beta,d_neg_full,'ko')
+plt.xlabel("beta")
+plt.ylabel("negativity difference")
+plt.show()
+
+mi_single_ent = df[1]
+mi_single_no_ent = df[2]
+
+
+plt.plot(beta,mi_single_ent-mi_single_no_ent,'ko')
+plt.xlabel("beta")
+plt.ylabel("mutual information difference")
+plt.show()
+
+
+neg_single_ent = df[5]
+neg_single_no_ent = df[6]
+
+plt.plot(beta[0:3],neg_single_ent[0:3]-neg_single_no_ent[0:3],'ko')
+plt.xlabel("beta")
+plt.ylabel("negativity difference")
+plt.show()
+
+
+
+
+plt.rc('font',size=15)
+fig, axs = plt.subplots(1, 2, figsize=(15, 5))
+
+axs[0].plot(beta,d_mi_full,'ko',linewidth =2)
+
+axs[0].set_xlabel(r"$\beta$")
+axs[0].set_ylabel('Mutual Information Difference')
+
+
+axs[1].plot(beta,d_neg_full,'ko',linewidth =2)
+
+axs[1].set_xlabel(r"$\beta$")
+axs[1].set_ylabel("Negativity Difference")
+
+labels = ["(a)", "(b)"]
+
+for ax, label in zip(axs.flat, labels):
+    ax.text(
+        -0.1,  # X-coordinate: slightly to the left of the plot boundary
+        1.05,  # Y-coordinate: slightly above the top plot boundary
+        label,
+        transform=ax.transAxes,  # Use relative axis units (0 to 1)
+        fontsize=14,
+        fontweight="bold",
+        va="bottom",  # Vertical alignment
+        ha="right",  # Horizontal alignment
+    )
+plt.show()
+
+
+
 print("stop")
